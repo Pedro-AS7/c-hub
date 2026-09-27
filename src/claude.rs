@@ -77,6 +77,53 @@ pub fn title_from_terminal(title: &str) -> Option<String> {
     (!title.is_empty() && title != "Claude Code").then(|| title.to_owned())
 }
 
+/// Modo de permissão do Claude Code, trocado com Shift+Tab na TUI.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mode {
+    Manual,
+    AcceptEdits,
+    Plan,
+    Auto,
+    Bypass,
+}
+
+/// Shift+Tab: passa para o próximo modo.
+pub const NEXT_MODE_KEY: &[u8] = b"\x1b[Z";
+
+impl Mode {
+    pub const ALL: [Mode; 5] = [Mode::Manual, Mode::AcceptEdits, Mode::Plan, Mode::Auto, Mode::Bypass];
+    /// Nomes no seletor, na ordem de `ALL`.
+    pub const LABELS: [&'static str; 5] = [
+        "Manual",
+        "Aceitar edições",
+        "Planejamento",
+        "Automático",
+        "Sem permissões",
+    ];
+
+    pub fn index(self) -> usize {
+        Self::ALL.iter().position(|mode| *mode == self).unwrap_or(0)
+    }
+
+    /// Lê o modo no rodapé da TUI (`⏵⏵ auto mode on (shift+tab to cycle)`, `⏸ manual mode on`…).
+    /// `None` quando o rodapé não aparece, por exemplo com um pedido de permissão na tela.
+    pub fn from_screen(lines: &[String]) -> Option<Self> {
+        const MARKS: [(&str, Mode); 5] = [
+            ("manual mode on", Mode::Manual),
+            ("accept edits on", Mode::AcceptEdits),
+            ("plan mode on", Mode::Plan),
+            ("auto mode on", Mode::Auto),
+            ("bypass permissions on", Mode::Bypass),
+        ];
+        lines.iter().rev().find_map(|line| {
+            MARKS
+                .iter()
+                .find(|(mark, _)| line.contains(mark))
+                .map(|(_, mode)| *mode)
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -91,6 +138,22 @@ mod tests {
         );
         assert_eq!(title_from_terminal("⠂ Corrigir o parser"), Some("Corrigir o parser".into()));
         assert_eq!(title_from_terminal("\"cargo\" falhou"), Some("\"cargo\" falhou".into()));
+    }
+
+    #[test]
+    fn mode_from_screen() {
+        let screen = |last: &str| vec!["❯ oi".to_owned(), "────".to_owned(), last.to_owned()];
+        assert_eq!(
+            Mode::from_screen(&screen("  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents")),
+            Some(Mode::Auto)
+        );
+        assert_eq!(
+            Mode::from_screen(&screen("  ⏸ manual mode on · ? for shortcuts")),
+            Some(Mode::Manual)
+        );
+        assert_eq!(Mode::from_screen(&screen("  ⏸ plan mode on (shift+tab to cycle)")), Some(Mode::Plan));
+        assert_eq!(Mode::from_screen(&screen("  ⏵⏵ accept edits on")), Some(Mode::AcceptEdits));
+        assert_eq!(Mode::from_screen(&screen("  Do you want to proceed?")), None);
     }
 
     #[test]

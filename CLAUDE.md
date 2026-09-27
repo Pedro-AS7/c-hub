@@ -20,7 +20,8 @@ Projeto em português (Brasil). Comentários e UI em PT-BR; identificadores de c
 
 - `cargo run` — roda em modo debug (a primeira compilação baixa e compila o libcosmic: alguns minutos).
 - `cargo build --release` — binário otimizado em `target/release/chube`.
-- `cargo test` — testes do leitor do `/usage` (`src/usage.rs`), do comando e do título em `src/claude.rs` e os que vieram do cosmic-term em `src/term/terminal_box.rs`.
+- `cargo test` — testes do leitor do `/usage` (`src/usage.rs`), do comando, do título e do modo em `src/claude.rs`,
+  das sugestões de `/comandos` (`src/commands.rs`) e os que vieram do cosmic-term em `src/term/terminal_box.rs`.
 - Opções: `chube [--model <modelo>] [--prompt <mensagem>]`. `--model` vale para os chats novos; `--prompt` é passado ao `claude`
   do primeiro chat, que já começa respondendo (útil para testar sem clicar).
 
@@ -35,8 +36,10 @@ src/
   app.rs        App (cosmic::Application): layout em pane_grid (painel | chat | terminal), update/view,
                 diálogo de nova sessão, painel lateral de sessões salvas, painel "Uso", leitura periódica
                 do status dos chats (Message::Poll)
-  chat.rs       Chat (terminal com o `claude` + status/título/contexto), Status; new / resume / fork / reopen
-  claude.rs     Comando do `claude` interativo, caminho do binário, título vindo do terminal
+  chat.rs       Chat (terminal com o `claude` + campo de mensagem, status/título/contexto/modo), Status;
+                new / resume / fork / reopen
+  claude.rs     Comando do `claude` interativo, caminho do binário, título vindo do terminal, Mode
+  commands.rs   Comandos `/…` sugeridos no campo de mensagem (do Claude Code, do usuário e do projeto)
   sessions.rs   Sessões salvas (~/.claude/projects), status de um `claude` pelo pid (~/.claude/sessions)
                 e contexto/modelo pelo fim do .jsonl
   dirs.rs       Resolve o diretório digitado: ".", "~", caminhos, atalhos do fshort (~/.shortcuts)
@@ -53,7 +56,8 @@ env -u ANTHROPIC_API_KEY claude (--session-id <uuid> | --resume <id> | --resume 
        [--model <m>] [-- <prompt>]
 ```
 
-- A conversa, as permissões, os comandos `/…` etc. são da própria TUI do Claude Code; o app não fala com o processo.
+- A conversa, as permissões, os comandos `/…` etc. são da própria TUI do Claude Code; o app só escreve no PTY,
+  como um teclado (campo de mensagem, seletor de modo).
 - Todos os chats ficam vivos ao mesmo tempo; a lista "Chats ativos" só troca qual terminal aparece na seção central.
 - `ANTHROPIC_API_KEY` sai do ambiente pelo `env -u`: com ela, o Claude Code cobraria pela API em vez do plano.
   O `env` faz `exec`, então o pid do PTY (`Terminal::pid`) é o do `claude`.
@@ -64,8 +68,24 @@ env -u ANTHROPIC_API_KEY claude (--session-id <uuid> | --resume <id> | --resume 
 - Fechar o app fecha os PTYs, e o `claude` recebe SIGHUP.
 - Quando o `claude` sai (`/exit`), o chat fica "encerrado" com a última saída na tela e o botão "Reabrir sessão"
   (`--resume` do mesmo id, no mesmo lugar da lista).
-- O × do cabeçalho fecha o chat (descarta o `Terminal`: SIGHUP no `claude`). Sem nenhum chat, a seção central mostra
+- O × do cabeçalho e o × de cada item da lista "Chats ativos" fecham o chat (descarta o `Terminal`: SIGHUP no `claude`). Sem nenhum chat, a seção central mostra
   "Nova sessão" / "Sessões salvas"; o código usa `self.chats.get(self.focused)`, nunca indexação direta.
+
+### Campo de mensagem (abaixo do terminal do chat)
+- `text_editor` do libcosmic que cresce com o texto (até `COMPOSER_MAX_HEIGHT`, depois rola). É ele que recebe o foco
+  ao trocar de chat; clicar no terminal do chat continua permitindo digitar direto na TUI.
+- Enter envia: o texto vai por bracketed paste (`Terminal::paste`) e o `\r` segue `SUBMIT_DELAY` depois — junto da
+  colagem, a TUI trataria o Enter como texto. Assim `/model`, `/btw` etc. rodam como comandos (testado na 2.1.283).
+- Teclas repassadas à TUI: Esc (interromper), Shift+Tab (modo), e, com o campo vazio, Enter e ↑/↓ (escolher opção
+  num pedido de permissão). Shift+Enter quebra a linha; Tab completa o `/comando` sugerido.
+- Sugestões: com o texto `/prefixo`, `commands::suggestions`; a lista (`commands::load`) é lida na primeira `/`.
+
+### Modo de permissão
+- Lido na tela (`term::screen_tail`, últimas 4 linhas): `manual mode on`, `accept edits on`, `plan mode on`,
+  `auto mode on`, `bypass permissions on` (`Mode::from_screen`). Sem o rodapé na tela (pedido de permissão aberto),
+  mantém o último lido. Relido a cada `Message::Poll`.
+- Trocar no seletor manda um Shift+Tab (`\x1b[Z`) por vez e relê a tela (`MODE_STEP_DELAY`) até chegar ao pedido;
+  desiste ao voltar ao modo inicial (o pedido não está no ciclo, ex.: "Sem permissões") ou após `MODE_MAX_STEPS`.
 
 ### Status, título e contexto
 - A cada 1 s (`Message::Poll`, em `spawn_blocking`), para cada chat vivo: `~/.claude/sessions/<pid>.json` →
@@ -94,6 +114,9 @@ env -u ANTHROPIC_API_KEY claude (--session-id <uuid> | --resume <id> | --resume 
 mudanças, marcadas no topo de cada arquivo:
 - eventos identificados por `TabId` em vez de `(pane, aba)`; `TerminalPaneGrid` removido; `Terminal::pid()`;
 - copiar/colar (Ctrl+Shift+C/V) tratado dentro do widget (no cosmic-term é atalho do app);
+- foco: o clique dá foco também no modo de mouse (a TUI do `claude` liga esse modo), clicar fora tira o foco
+  (antes, o terminal do chat e o do painel ficavam os dois com foco e recebiam o mesmo texto) e o foco volta
+  quando a janela recupera o dela (antes era preciso trocar de chat);
 - `terminal_theme.rs` só com as paletas COSMIC Dark/Light.
 
 `term/mod.rs` substitui o que esses arquivos usavam do cosmic-term (`Config` com os valores padrão de lá, `MenuState`,
@@ -115,10 +138,12 @@ O Claude **não consegue clicar nem digitar na janela** (o app não aparece no A
 - captura de tela: `cosmic-screenshot --interactive=false --modal=false --notify=false -s <pasta>`;
 - fluxos de chat: abrir com `--model haiku --prompt "…"` e capturar a tela; status e sessão do `claude` do chat em
   `~/.claude/sessions/<pid>.json` (`pgrep -af "claude --session-id"`);
-- para fechar o app: `pkill -x chube` (**não** `pkill -f …chube`, que casa com o próprio shell do comando);
+- para fechar o app: `pkill -x chube` (**não** `pkill -f …chube`, que casa com o próprio shell do comando).
+  Se o Claude estiver rodando **dentro** de um Chube, abra uma segunda instância e feche só ela pelo pid;
 - lógica fora da UI (parsers, resolução de diretório): testes em Rust;
 - cliques e digitação (troca de chat, painel de sessões, diálogo de nova sessão, sub-chat, "Reabrir sessão",
-  terminais): pedir para conferir manualmente.
+  terminais, campo de mensagem, seletor de modo): pedir para conferir manualmente;
+- bytes que a TUI entende: script Python com `pty.fork()` rodando o `claude` (comandos locais como `/help` não gastam tokens).
 
 ## Status do projeto
 

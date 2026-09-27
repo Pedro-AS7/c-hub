@@ -1,6 +1,7 @@
 mod app;
 mod chat;
 mod claude;
+mod commands;
 mod dirs;
 mod sessions;
 mod term;
@@ -36,14 +37,13 @@ fn main() -> cosmic::iced::Result {
     cosmic::app::run::<app::App>(settings, parse_args())
 }
 
-/// `chube [--model <modelo>] [--prompt <mensagem>]`
+/// `chube [--model <modelo>]`
 fn parse_args() -> app::Flags {
     let mut flags = app::Flags::default();
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--model" => flags.model = args.next(),
-            "--prompt" => flags.prompt = args.next(),
             _ => eprintln!("argumento ignorado: {arg}"),
         }
     }

@@ -4,12 +4,14 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use cosmic::app::{Core, Task};
+use cosmic::iced::keyboard::{Key, key::Named};
 use cosmic::iced::{Alignment, Length, Subscription};
-use cosmic::widget::{self, pane_grid, segmented_button, tooltip};
+use cosmic::widget::{self, pane_grid, segmented_button, text_editor, tooltip};
 use cosmic::{Application, ApplicationExt, Element, theme};
 
-use crate::chat::{Chat, Status};
-use crate::claude;
+use crate::chat::{Chat, ModeChange, Status};
+use crate::claude::{self, Mode};
+use crate::commands::{self, Command};
 use crate::dirs;
 use crate::sessions::{self, Running, SavedSession, Stats};
 use crate::term::{self, Terminal};
@@ -20,6 +22,15 @@ const REFRESH_EVERY: Duration = Duration::from_secs(180);
 /// Intervalo da leitura do status das sessões (`~/.claude/sessions`).
 const POLL_EVERY: Duration = Duration::from_secs(1);
 const TITLE_MAX_CHARS: usize = 40;
+/// Espera entre colar a mensagem e mandar o Enter: junto da colagem, a TUI trataria o
+/// Enter como parte do texto.
+const SUBMIT_DELAY: Duration = Duration::from_millis(80);
+/// Espera entre um Shift+Tab e a leitura do modo na tela.
+const MODE_STEP_DELAY: Duration = Duration::from_millis(250);
+/// Mais Shift+Tab do que isso e o modo pedido não está no ciclo.
+const MODE_MAX_STEPS: u8 = 6;
+/// Altura máxima do campo de mensagem; acima disso, ele rola.
+const COMPOSER_MAX_HEIGHT: f32 = 360.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Section {
@@ -44,7 +55,16 @@ pub enum Message {
     ResumeSession(usize),
     SubChat,
     ReopenChat,
-    CloseChat,
+    CloseChat(usize),
+    SetMode(usize),
+    ModeStep(term::TabId),
+    ComposerAction(text_editor::Action),
+    ComposerSend,
+    /// Teclas repassadas do campo ao `claude` do chat em foco (Esc, Shift+Tab, setas…).
+    ComposerKey(&'static [u8]),
+    ComposerComplete(String),
+    SubmitEnter(term::TabId),
+    CommandsLoaded(term::TabId, Vec<Command>),
     Poll,
     Polled(Vec<Polled>),
     OpenLink(String),
@@ -74,8 +94,6 @@ pub struct Polled {
 pub struct Flags {
     /// Modelo usado nos chats novos (padrão: o do Claude Code).
     pub model: Option<String>,
-    /// Primeira mensagem, passada ao `claude` do primeiro chat.
-    pub prompt: Option<String>,
 }
 
 pub struct App {
@@ -84,8 +102,8 @@ pub struct App {
     focused: usize,
     default_dir: PathBuf,
     model: Option<String>,
-    /// Id do widget do terminal do chat, para dar foco ao trocar de chat.
-    chat_term_id: widget::Id,
+    /// Id do campo de mensagem do chat, para dar foco ao trocar de chat.
+    composer_id: widget::Id,
     polling: bool,
     panes: pane_grid::State<Section>,
     sidebar_visible: bool,
@@ -142,7 +160,7 @@ impl Application for App {
             focused: 0,
             default_dir,
             model: flags.model,
-            chat_term_id: widget::Id::unique(),
+            composer_id: widget::Id::unique(),
             polling: false,
             panes: pane_grid::State::new(Section::Chat).0,
             sidebar_visible: true,
@@ -165,7 +183,7 @@ impl Application for App {
         app.rebuild_panes();
         // O terminal do chat abre quando o canal de eventos chegar (`Message::TermEventTx`).
         let id = app.take_terminal_id();
-        let chat = Chat::new(id, app.default_dir.clone(), app.model.clone(), flags.prompt);
+        let chat = Chat::new(id, app.default_dir.clone(), app.model.clone(), None);
         app.chats.push(chat);
         app.set_header_title("Chube".into());
 
@@ -182,7 +200,7 @@ impl Application for App {
             Message::SelectChat(index) => {
                 if index < self.chats.len() {
                     self.focused = index;
-                    return self.focus_chat_terminal();
+                    return self.focus_composer();
                 }
             }
             Message::NewChat => {
@@ -247,7 +265,7 @@ impl Application for App {
                 self.set_show_context(false);
                 if let Some(open) = self.chat_index_for_session(&saved.id) {
                     self.focused = open;
-                    return self.focus_chat_terminal();
+                    return self.focus_composer();
                 }
                 let id = self.take_terminal_id();
                 return self.open_chat(self.chats.len(), Chat::resume(id, &saved, self.model.clone()));
@@ -266,14 +284,114 @@ impl Application for App {
                     return self.open_chat(self.focused, chat);
                 }
             }
-            Message::CloseChat => {
-                if self.focused < self.chats.len() {
-                    // Descartar o `Terminal` fecha o PTY, e o `claude` recebe SIGHUP.
-                    self.chats.remove(self.focused);
+            Message::CloseChat(index) => {
+                if index < self.chats.len() {
+                    // Descartar o `Terminal` fecha o PTY, e o `claude` recebe SIGHUP: sai
+                    // como no `/exit`, com a sessão salva.
+                    self.chats.remove(index);
+                    if index < self.focused {
+                        self.focused -= 1;
+                    }
                     self.focused = self.focused.min(self.chats.len().saturating_sub(1));
                     if !self.chats.is_empty() {
-                        return self.focus_chat_terminal();
+                        return self.focus_composer();
                     }
+                }
+            }
+            Message::SetMode(index) => {
+                let Some(chat) = self.chats.get_mut(self.focused) else {
+                    return Task::none();
+                };
+                let target = Mode::ALL[index.min(Mode::ALL.len() - 1)];
+                chat.read_mode();
+                if chat.mode == Some(target) || !chat.is_alive() {
+                    return Task::none();
+                }
+                chat.mode_change = Some(ModeChange {
+                    target,
+                    start: chat.mode,
+                    steps: 1,
+                });
+                chat.send(claude::NEXT_MODE_KEY);
+                return mode_step_later(chat.id);
+            }
+            Message::ModeStep(id) => {
+                let Some(chat) = self.chats.iter_mut().find(|chat| chat.id == id) else {
+                    return Task::none();
+                };
+                let Some(mut change) = chat.mode_change.take() else {
+                    return Task::none();
+                };
+                chat.read_mode();
+                let arrived = chat.mode == Some(change.target);
+                let looped = change.start.is_some() && chat.mode == change.start;
+                if arrived || looped || change.steps >= MODE_MAX_STEPS || !chat.is_alive() {
+                    return Task::none();
+                }
+                change.steps += 1;
+                chat.mode_change = Some(change);
+                chat.send(claude::NEXT_MODE_KEY);
+                return mode_step_later(id);
+            }
+            Message::ComposerAction(action) => {
+                let Some(chat) = self.chats.get_mut(self.focused) else {
+                    return Task::none();
+                };
+                chat.composer.perform(action);
+                // Os comandos do usuário e do projeto são lidos na primeira `/`.
+                if chat.commands.is_none() && chat.composer.text().starts_with('/') {
+                    chat.commands = Some(Vec::new());
+                    let (id, cwd) = (chat.id, chat.cwd.clone());
+                    return cosmic::task::future(async move {
+                        let list = tokio::task::spawn_blocking(move || commands::load(&cwd))
+                            .await
+                            .unwrap_or_default();
+                        Message::CommandsLoaded(id, list)
+                    });
+                }
+            }
+            Message::CommandsLoaded(id, list) => {
+                if let Some(chat) = self.chats.iter_mut().find(|chat| chat.id == id) {
+                    chat.commands = Some(list);
+                }
+            }
+            Message::ComposerComplete(name) => {
+                if let Some(chat) = self.chats.get_mut(self.focused) {
+                    chat.composer = text_editor::Content::with_text(&format!("/{name} "));
+                    chat.composer
+                        .perform(text_editor::Action::Move(text_editor::Motion::DocumentEnd));
+                }
+                return self.focus_composer();
+            }
+            Message::ComposerSend => {
+                let Some(chat) = self.chats.get_mut(self.focused) else {
+                    return Task::none();
+                };
+                let text = chat.composer.text().trim_end().to_owned();
+                // Campo vazio: o Enter vai para a TUI (confirma a opção escolhida na tela).
+                if text.trim().is_empty() {
+                    chat.send(b"\r".as_slice());
+                    return Task::none();
+                }
+                if !chat.is_alive() {
+                    return Task::none();
+                }
+                chat.composer = text_editor::Content::new();
+                chat.paste(text);
+                let id = chat.id;
+                return cosmic::task::future(async move {
+                    tokio::time::sleep(SUBMIT_DELAY).await;
+                    Message::SubmitEnter(id)
+                });
+            }
+            Message::SubmitEnter(id) => {
+                if let Some(chat) = self.chats.iter().find(|chat| chat.id == id) {
+                    chat.send(b"\r".as_slice());
+                }
+            }
+            Message::ComposerKey(bytes) => {
+                if let Some(chat) = self.chats.get(self.focused) {
+                    chat.send(bytes);
                 }
             }
             Message::Poll => return self.poll(),
@@ -341,7 +459,7 @@ impl Application for App {
                     for index in 0..self.chats.len() {
                         self.spawn_chat_terminal(index);
                     }
-                    return self.focus_chat_terminal();
+                    return self.focus_composer();
                 }
             }
             Message::TermEvent(id, event) => return self.handle_term_event(id, event),
@@ -485,7 +603,7 @@ impl App {
         self.chats.insert(index, chat);
         self.focused = index;
         self.spawn_chat_terminal(index);
-        self.focus_chat_terminal()
+        self.focus_composer()
     }
 
     /// Abre o terminal do chat rodando o `claude`, se o canal de eventos já existe.
@@ -507,8 +625,8 @@ impl App {
         }
     }
 
-    fn focus_chat_terminal(&self) -> Task<Message> {
-        widget::text_input::focus(self.chat_term_id.clone())
+    fn focus_composer(&self) -> Task<Message> {
+        widget::text_input::focus(self.composer_id.clone())
     }
 
     /// Lê o status de cada `claude` (e o contexto do chat em foco) fora da thread da UI.
@@ -548,6 +666,9 @@ impl App {
     }
 
     fn apply_poll(&mut self, list: Vec<Polled>) {
+        for chat in self.chats.iter_mut().filter(|chat| chat.is_alive()) {
+            chat.read_mode();
+        }
         for polled in list {
             let Some(chat) = self.chats.iter_mut().find(|chat| chat.id == polled.chat) else {
                 continue;
@@ -674,19 +795,34 @@ impl App {
 
         let mut list = widget::Column::new().spacing(space.space_xxs);
         for (index, chat) in self.chats.iter().enumerate() {
-            let subtitle = format!(
-                "{} · {}",
-                chat.status.label(),
-                claude::display_path(&chat.cwd)
-            );
-            let item = widget::Column::new()
-                .push(widget::text::body(chat.title.as_str()))
-                .push(widget::text::caption(subtitle));
+            // Trabalhando / precisa de você viram badge; os outros status ficam no texto.
+            let mut subtitle = widget::Row::new()
+                .spacing(space.space_xxs)
+                .align_y(Alignment::Center);
+            let path = claude::display_path(&chat.cwd);
+            subtitle = match status_badge(chat.status) {
+                Some(badge) => subtitle.push(badge).push(widget::text::caption(path)),
+                None => subtitle.push(widget::text::caption(format!("{} · {path}", chat.status.label()))),
+            };
+            let item = widget::Row::new()
+                .push(
+                    widget::Column::new()
+                        .push(widget::text::body(chat.title.as_str()))
+                        .push(subtitle)
+                        .spacing(space.space_xxxs)
+                        .width(Length::Fill),
+                )
+                .push(icon_button(
+                    "window-close-symbolic",
+                    "Fechar este chat (como /exit)",
+                    Some(Message::CloseChat(index)),
+                ))
+                .align_y(Alignment::Center);
             list = list.push(
                 widget::button::custom(item)
                     .class(theme::Button::ListItem([8.0; 4]))
                     .selected(index == self.focused)
-                    .padding([space.space_xxs, space.space_xs])
+                    .padding([space.space_xxs, space.space_xxs, space.space_xxs, space.space_xs])
                     .width(Length::Fill)
                     .on_press(Message::SelectChat(index)),
             );
@@ -829,9 +965,15 @@ impl App {
             header = header.push(show_sidebar_button());
         }
         let can_fork = chat.session_id.is_some() && chat.status != Status::Starting;
+        header = header.push(title).push(horizontal_fill());
+        if chat.is_alive() {
+            // Modo de permissão; Shift+Tab no campo de mensagem também troca.
+            header = header.push(
+                widget::dropdown(&Mode::LABELS[..], chat.mode.map(Mode::index), Message::SetMode)
+                    .placeholder("Modo"),
+            );
+        }
         header = header
-            .push(title)
-            .push(horizontal_fill())
             .push(icon_button(
                 "edit-copy-symbolic",
                 "Criar sub-chat com o contexto deste chat",
@@ -839,8 +981,8 @@ impl App {
             ))
             .push(icon_button(
                 "window-close-symbolic",
-                "Fechar este chat",
-                Some(Message::CloseChat),
+                "Fechar este chat (como /exit)",
+                Some(Message::CloseChat(self.focused)),
             ))
             .push(self.chat_toggle_button())
             .align_y(Alignment::Center)
@@ -876,7 +1018,6 @@ impl App {
                 let current = theme::active();
                 let cosmic = current.cosmic();
                 term::terminal_box(terminal, &term::KEY_BINDS)
-                    .id(self.chat_term_id.clone())
                     .padding(space.space_xxs)
                     .pane_border_radius(Some(cosmic.corner_radii.radius_s.into()))
                     .on_open_hyperlink(Some(Box::new(Message::OpenLink)))
@@ -891,7 +1032,49 @@ impl App {
             .into(),
         };
 
-        card(column.push(body).spacing(space.space_s)).into()
+        let mut column = column.push(body);
+        if chat.is_alive() {
+            column = column.push(self.composer(chat));
+        }
+        card(column.spacing(space.space_s)).into()
+    }
+
+    /// Campo de mensagem do chat: cresce com o texto; Enter envia, Shift+Enter quebra a linha.
+    fn composer<'a>(&'a self, chat: &'a Chat) -> Element<'a, Message> {
+        let space = theme::spacing();
+        let text = chat.composer.text();
+        let suggestions = chat
+            .commands
+            .as_deref()
+            .map(|list| commands::suggestions(list, &text))
+            .unwrap_or_default();
+        let first = suggestions.first().map(|command| command.name.clone());
+        let empty = text.is_empty();
+
+        let editor = text_editor::TextEditor::new(&chat.composer)
+            .id(self.composer_id.clone())
+            .placeholder("Mensagem ou /comando")
+            .padding(space.space_xs)
+            .max_height(COMPOSER_MAX_HEIGHT)
+            .on_action(Message::ComposerAction)
+            .key_binding(move |press| composer_key(press, empty, first.as_deref()));
+
+        let mut column = widget::Column::new().spacing(space.space_xxs);
+        for command in suggestions {
+            let row = widget::Row::new()
+                .push(widget::text::body(format!("/{}", command.name)).width(Length::FillPortion(1)))
+                .push(widget::text::caption(command.description.as_str()).width(Length::FillPortion(3)))
+                .spacing(space.space_s)
+                .align_y(Alignment::Center);
+            column = column.push(
+                widget::button::custom(row)
+                    .class(theme::Button::ListItem([8.0; 4]))
+                    .padding([space.space_xxxs, space.space_xs])
+                    .width(Length::Fill)
+                    .on_press(Message::ComposerComplete(command.name.clone())),
+            );
+        }
+        column.push(editor).into()
     }
 
     /// Seção do chat depois de fechar o último.
@@ -994,9 +1177,20 @@ impl App {
             }
             (None, false) => false,
         };
+        let running = self
+            .chat_index_for_session(&saved.id)
+            .map(|index| self.chats[index].status)
+            .or_else(|| saved.running.as_deref().and_then(Status::from_claude));
+        let mut subtitle = widget::Row::new()
+            .spacing(space.space_xxs)
+            .align_y(Alignment::Center);
+        if let Some(badge) = running.and_then(status_badge) {
+            subtitle = subtitle.push(badge);
+        }
         let item = widget::Column::new()
             .push(widget::text::body(saved.title.as_str()))
-            .push(widget::text::caption(details));
+            .push(subtitle.push(widget::text::caption(details)))
+            .spacing(space.space_xxxs);
         widget::button::custom(item)
             .class(theme::Button::ListItem([8.0; 4]))
             .padding([space.space_xxs, space.space_m])
@@ -1098,6 +1292,66 @@ fn icon_button<'a>(
         tooltip::Position::Bottom,
     )
     .into()
+}
+
+/// Teclas do campo de mensagem. Enter envia; Esc e Shift+Tab vão direto para a TUI
+/// (interromper, trocar de modo); Tab completa o comando `/` sugerido; com o campo vazio,
+/// as setas também vão para a TUI (escolher uma opção num pedido de permissão).
+fn composer_key(
+    press: text_editor::KeyPress,
+    empty: bool,
+    suggestion: Option<&str>,
+) -> Option<text_editor::Binding<Message>> {
+    use text_editor::Binding;
+
+    if !matches!(press.status, text_editor::Status::Focused { .. }) {
+        return None;
+    }
+    let shift = press.modifiers.shift();
+    let custom = |message| Some(Binding::Custom(message));
+    match press.key.as_ref() {
+        Key::Named(Named::Enter) if !shift => custom(Message::ComposerSend),
+        Key::Named(Named::Escape) => custom(Message::ComposerKey(b"\x1b")),
+        Key::Named(Named::Tab) if shift => custom(Message::ComposerKey(claude::NEXT_MODE_KEY)),
+        Key::Named(Named::Tab) => suggestion.map(|name| Binding::Custom(Message::ComposerComplete(name.to_owned()))),
+        Key::Named(Named::ArrowUp) if empty => custom(Message::ComposerKey(b"\x1b[A")),
+        Key::Named(Named::ArrowDown) if empty => custom(Message::ComposerKey(b"\x1b[B")),
+        _ => Binding::from_key_press(press),
+    }
+}
+
+/// Relê o modo na tela um pouco depois do Shift+Tab.
+fn mode_step_later(id: term::TabId) -> Task<Message> {
+    cosmic::task::future(async move {
+        tokio::time::sleep(MODE_STEP_DELAY).await;
+        Message::ModeStep(id)
+    })
+}
+
+/// Badge colorido para os status que pedem atenção na lista.
+fn status_badge<'a>(status: Status) -> Option<Element<'a, Message>> {
+    let color: fn(&cosmic::cosmic_theme::Theme) -> cosmic::cosmic_theme::palette::Srgba = match status {
+        Status::Working => |theme| theme.accent_color(),
+        Status::Waiting => |theme| theme.warning_color(),
+        _ => return None,
+    };
+    Some(
+        widget::container(widget::text::caption(status.label()))
+            .padding([0, theme::spacing().space_xs])
+            .class(theme::Container::custom(move |theme| {
+                let color = cosmic::iced::Color::from(color(theme.cosmic()));
+                widget::container::Style {
+                    text_color: Some(color),
+                    background: Some(cosmic::iced::Color { a: 0.18, ..color }.into()),
+                    border: cosmic::iced::Border {
+                        radius: 8.0.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }
+            }))
+            .into(),
+    )
 }
 
 /// Recebe os eventos de todos os terminais (vêm das threads do PTY).

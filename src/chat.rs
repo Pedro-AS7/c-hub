@@ -1,7 +1,10 @@
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use crate::claude::Start;
+use cosmic::widget::text_editor;
+
+use crate::claude::{Mode, Start};
+use crate::commands::Command;
 use crate::sessions::SavedSession;
 use crate::term::{self, Terminal};
 
@@ -57,6 +60,23 @@ pub struct Chat {
     pub context_tokens: u32,
     /// `None` até o canal de eventos do terminal existir ou se o `claude` não abriu.
     pub terminal: Option<Mutex<Terminal>>,
+    /// Texto do campo de mensagem abaixo do terminal.
+    pub composer: text_editor::Content<cosmic::Renderer>,
+    /// Modo de permissão lido na tela; `None` até aparecer no rodapé da TUI.
+    pub mode: Option<Mode>,
+    pub mode_change: Option<ModeChange>,
+    /// Comandos `/…` sugeridos no campo; carregados na primeira `/`.
+    pub commands: Option<Vec<Command>>,
+}
+
+/// Troca de modo em andamento: um Shift+Tab por vez até a tela mostrar o modo pedido.
+#[derive(Clone, Copy, Debug)]
+pub struct ModeChange {
+    pub target: Mode,
+    /// Modo antes da troca: voltar a ele quer dizer que o pedido não está no ciclo
+    /// (ex.: "Sem permissões" sem `--dangerously-skip-permissions`).
+    pub start: Option<Mode>,
+    pub steps: u8,
 }
 
 impl Chat {
@@ -146,6 +166,10 @@ impl Chat {
             active_model: None,
             context_tokens: 0,
             terminal: None,
+            composer: text_editor::Content::new(),
+            mode: None,
+            mode_change: None,
+            commands: None,
         }
     }
 
@@ -156,6 +180,30 @@ impl Chat {
 
     pub fn is_alive(&self) -> bool {
         self.status != Status::Exited
+    }
+
+    /// Manda bytes ao `claude`, como teclas digitadas no terminal.
+    pub fn send(&self, bytes: impl Into<Vec<u8>>) {
+        if let Some(Ok(terminal)) = self.terminal.as_ref().map(Mutex::lock) {
+            terminal.input_scroll(bytes.into());
+        }
+    }
+
+    /// Cola o texto no `claude` (bracketed paste: quebras de linha não enviam a mensagem).
+    pub fn paste(&self, text: String) {
+        if let Some(Ok(terminal)) = self.terminal.as_ref().map(Mutex::lock) {
+            terminal.paste(text);
+        }
+    }
+
+    /// Relê o modo no rodapé da TUI; mantém o anterior se o rodapé não está na tela.
+    pub fn read_mode(&mut self) {
+        let Some(Ok(terminal)) = self.terminal.as_ref().map(Mutex::lock) else {
+            return;
+        };
+        if let Some(mode) = Mode::from_screen(&term::screen_tail(&terminal, 4)) {
+            self.mode = Some(mode);
+        }
     }
 
     /// Pid do `claude` deste chat.

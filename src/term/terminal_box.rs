@@ -1,5 +1,7 @@
 // Adaptado de cosmic-term (src/terminal_box.rs), © System76, GPL-3.0-only.
-// Mudanças: imports do Chube e copiar/colar (Ctrl+Shift+C/V) tratados aqui mesmo.
+// Mudanças: imports do Chube, copiar/colar (Ctrl+Shift+C/V) tratados aqui mesmo e foco:
+// o clique dá foco também no modo de mouse (o `claude` liga esse modo), o clique fora tira
+// o foco (senão dois terminais recebem o que se digita) e o foco volta com o da janela.
 
 // SPDX-License-Identifier: GPL-3.0-only
 
@@ -910,6 +912,11 @@ where
         match event {
             Event::Window(event) => match event {
                 cosmic::iced::window::Event::Focused => {
+                    // Chube: devolve o foco que o terminal tinha antes de a janela perdê-lo.
+                    if state.focused_before_unfocus {
+                        state.is_focused = true;
+                        state.focused_before_unfocus = false;
+                    }
                     if let Some(on_window_focused) = &self.on_window_focused {
                         shell.publish(on_window_focused());
                     }
@@ -938,6 +945,7 @@ where
                     shell.request_input_method(&self.input_method(state, layout, &terminal));
                 }
                 cosmic::iced::window::Event::Unfocused => {
+                    state.focused_before_unfocus = state.is_focused;
                     state.is_focused = false;
                     state.autoscroll.stop();
                     if let Some(on_window_unfocused) = &self.on_window_unfocused {
@@ -1265,7 +1273,12 @@ where
                 }
             },
             Event::Mouse(MouseEvent::ButtonPressed(button)) => {
+                // Chube: clicar em outro widget tira o foco deste terminal.
+                if !cursor_position.is_over(layout.bounds()) {
+                    state.is_focused = false;
+                }
                 if let Some(p) = cursor_position.position_in(layout.bounds()) {
+                    state.is_focused = true;
                     let x = p.x - self.padding.left;
                     let y = p.y - self.padding.top;
                     //TODO: better calculation of position
@@ -1971,6 +1984,8 @@ pub struct State {
     click: Option<(ClickKind, Instant)>,
     dragging: Option<Dragging>,
     is_focused: bool,
+    /// Chube: foco do terminal quando a janela perdeu o dela.
+    focused_before_unfocus: bool,
     scroll_pixels: f32,
     scroll_lines: f32,
     scrollbar_rect: Cell<Rectangle<f32>>,
@@ -1986,6 +2001,7 @@ impl State {
             click: None,
             dragging: None,
             is_focused: false,
+            focused_before_unfocus: false,
             scroll_pixels: 0.0,
             scroll_lines: 0.0,
             scrollbar_rect: Cell::new(Rectangle::default()),
@@ -2006,6 +2022,7 @@ impl operation::Focusable for State {
 
     fn unfocus(&mut self) {
         self.is_focused = false;
+        self.focused_before_unfocus = false;
     }
 }
 

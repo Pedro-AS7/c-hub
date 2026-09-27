@@ -154,3 +154,19 @@ pub fn spawn(
     terminal.set_config(&config, kind, &themes);
     Ok(Mutex::new(terminal))
 }
+
+/// Texto das últimas `count` linhas da tela (sem o histórico nem a rolagem).
+pub fn screen_tail(terminal: &Terminal, count: usize) -> Vec<String> {
+    use alacritty_terminal::grid::Dimensions;
+    use alacritty_terminal::index::{Column, Line};
+
+    let term = terminal.term.lock();
+    let grid = term.grid();
+    let rows = grid.screen_lines();
+    (rows.saturating_sub(count)..rows)
+        .map(|row| {
+            let line = &grid[Line(row as i32)];
+            (0..grid.columns()).map(|col| line[Column(col)].c).collect::<String>()
+        })
+        .collect()
+}
