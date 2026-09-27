@@ -64,6 +64,8 @@ env -u ANTHROPIC_API_KEY claude (--session-id <uuid> | --resume <id> | --resume 
 - Fechar o app fecha os PTYs, e o `claude` recebe SIGHUP.
 - Quando o `claude` sai (`/exit`), o chat fica "encerrado" com a última saída na tela e o botão "Reabrir sessão"
   (`--resume` do mesmo id, no mesmo lugar da lista).
+- O × do cabeçalho fecha o chat (descarta o `Terminal`: SIGHUP no `claude`). Sem nenhum chat, a seção central mostra
+  "Nova sessão" / "Sessões salvas"; o código usa `self.chats.get(self.focused)`, nunca indexação direta.
 
 ### Status, título e contexto
 - A cada 1 s (`Message::Poll`, em `spawn_blocking`), para cada chat vivo: `~/.claude/sessions/<pid>.json` →
@@ -127,10 +129,9 @@ Não está instalado (sem binário em `~/.local/bin` nem `.desktop`).
 
 Validado por captura de tela: o `claude` do chat abre com `--prompt`, responde, e status, modelo e contexto aparecem.
 Ainda não testado com clique: troca entre chats, painel de sessões, diálogo de nova sessão, sub-chat, "Reabrir sessão",
-digitação nos terminais.
+digitação nos terminais, fechar chat.
 
 Limitações conhecidas:
-- não há botão para fechar um chat: `/exit` deixa ele "encerrado" na lista até fechar o app;
 - o status só vem de `~/.claude/sessions`, um arquivo interno do Claude Code (formato pode mudar);
 - o terminal não tem menu de contexto, zoom, busca nem divisão em painéis (o cosmic-term tem);
 - a leitura do `/usage` depende do texto do Claude Code.

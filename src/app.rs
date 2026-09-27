@@ -44,6 +44,7 @@ pub enum Message {
     ResumeSession(usize),
     SubChat,
     ReopenChat,
+    CloseChat,
     Poll,
     Polled(Vec<Polled>),
     OpenLink(String),
@@ -253,16 +254,26 @@ impl Application for App {
             }
             Message::SubChat => {
                 let id = self.take_terminal_id();
-                if let Some(chat) = self.chats[self.focused].fork(id) {
+                if let Some(chat) = self.chats.get(self.focused).and_then(|chat| chat.fork(id)) {
                     return self.open_chat(self.focused + 1, chat);
                 }
             }
             Message::ReopenChat => {
                 let id = self.take_terminal_id();
-                if let Some(chat) = self.chats[self.focused].reopen(id) {
+                if let Some(chat) = self.chats.get(self.focused).and_then(|chat| chat.reopen(id)) {
                     // Descartar o chat antigo encerra o terminal dele.
                     self.chats.remove(self.focused);
                     return self.open_chat(self.focused, chat);
+                }
+            }
+            Message::CloseChat => {
+                if self.focused < self.chats.len() {
+                    // Descartar o `Terminal` fecha o PTY, e o `claude` recebe SIGHUP.
+                    self.chats.remove(self.focused);
+                    self.focused = self.focused.min(self.chats.len().saturating_sub(1));
+                    if !self.chats.is_empty() {
+                        return self.focus_chat_terminal();
+                    }
                 }
             }
             Message::Poll => return self.poll(),
@@ -716,7 +727,7 @@ impl App {
 
     fn info_card(&self) -> Element<'_, Message> {
         let space = theme::spacing();
-        let chat = &self.chats[self.focused];
+        let context_tokens = self.chats.get(self.focused).map_or(0, |chat| chat.context_tokens);
         let working = self
             .chats
             .iter()
@@ -733,15 +744,15 @@ impl App {
             ))
             .align_y(Alignment::Center);
 
-        let context = if chat.context_tokens == 0 {
+        let context = if context_tokens == 0 {
             meter("Contexto do chat em foco", 0.0, "—".into(), None)
         } else {
             // O histórico não diz o tamanho da janela: acima de 200 mil, só pode ser a de 1 milhão.
-            let window: u32 = if chat.context_tokens > 200_000 { 1_000_000 } else { 200_000 };
+            let window: u32 = if context_tokens > 200_000 { 1_000_000 } else { 200_000 };
             meter(
                 "Contexto do chat em foco",
-                chat.context_tokens as f32 / window as f32,
-                format!("{} / {} mil", thousands(chat.context_tokens), window / 1000),
+                context_tokens as f32 / window as f32,
+                format!("{} / {} mil", thousands(context_tokens), window / 1000),
                 None,
             )
         };
@@ -798,7 +809,9 @@ impl App {
 
     fn chat_section(&self) -> Element<'_, Message> {
         let space = theme::spacing();
-        let chat = &self.chats[self.focused];
+        let Some(chat) = self.chats.get(self.focused) else {
+            return self.no_chat_section();
+        };
 
         let mut details = vec![claude::display_path(&chat.cwd)];
         if let Some(model) = chat.active_model.as_ref().or(chat.model.as_ref()) {
@@ -824,21 +837,14 @@ impl App {
                 "Criar sub-chat com o contexto deste chat",
                 can_fork.then_some(Message::SubChat),
             ))
+            .push(icon_button(
+                "window-close-symbolic",
+                "Fechar este chat",
+                Some(Message::CloseChat),
+            ))
+            .push(self.chat_toggle_button())
             .align_y(Alignment::Center)
             .spacing(space.space_xxs);
-        header = if self.terminal_visible {
-            header.push(icon_button(
-                "pan-start-symbolic",
-                "Esconder o chat",
-                Some(Message::HideSection(Section::Chat)),
-            ))
-        } else {
-            header.push(icon_button(
-                "utilities-terminal-symbolic",
-                "Mostrar o terminal",
-                Some(Message::ShowSection(Section::Terminal)),
-            ))
-        };
 
         let mut column = widget::Column::new().push(header);
         if !chat.is_alive() {
@@ -886,6 +892,46 @@ impl App {
         };
 
         card(column.push(body).spacing(space.space_s)).into()
+    }
+
+    /// Seção do chat depois de fechar o último.
+    fn no_chat_section(&self) -> Element<'_, Message> {
+        let space = theme::spacing();
+        let mut header = widget::Row::new();
+        if !self.sidebar_visible {
+            header = header.push(show_sidebar_button());
+        }
+        let header = header
+            .push(widget::text::heading("Nenhum chat aberto"))
+            .push(horizontal_fill())
+            .push(self.chat_toggle_button())
+            .align_y(Alignment::Center)
+            .spacing(space.space_xxs);
+        let body = widget::container(
+            widget::Row::new()
+                .push(widget::button::suggested("Nova sessão").on_press(Message::NewChat))
+                .push(widget::button::standard("Sessões salvas").on_press(Message::ShowSessions))
+                .spacing(space.space_s),
+        )
+        .center(Length::Fill);
+        card(widget::Column::new().push(header).push(body).spacing(space.space_s)).into()
+    }
+
+    /// Esconde o chat ou, com o terminal escondido, mostra o terminal.
+    fn chat_toggle_button(&self) -> Element<'_, Message> {
+        if self.terminal_visible {
+            icon_button(
+                "pan-start-symbolic",
+                "Esconder o chat",
+                Some(Message::HideSection(Section::Chat)),
+            )
+        } else {
+            icon_button(
+                "utilities-terminal-symbolic",
+                "Mostrar o terminal",
+                Some(Message::ShowSection(Section::Terminal)),
+            )
+        }
     }
 
     fn sessions_list(&self) -> Element<'_, Message> {
