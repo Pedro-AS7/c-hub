@@ -1032,10 +1032,7 @@ impl App {
             .into(),
         };
 
-        let mut column = column.push(body);
-        if chat.is_alive() {
-            column = column.push(self.composer(chat));
-        }
+        let column = column.push(body);
         card(column.spacing(space.space_s)).into()
     }
 
