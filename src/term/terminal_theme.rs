@@ -1,5 +1,6 @@
 // Adaptado de cosmic-term (src/terminal_theme.rs), © System76, GPL-3.0-only.
 // Só as paletas COSMIC Dark/Light; temas em arquivo e exportação ficaram de fora.
+// `from_palette` (paletas dos temas do Chube) não existe no cosmic-term.
 
 use alacritty_terminal::{
     term::color::Colors,
@@ -130,6 +131,70 @@ pub fn cosmic_light() -> Colors {
     colors[NamedColor::Cursor] = colors[NamedColor::Black];
     colors[NamedColor::BrightForeground] = colors[NamedColor::BrightBlack];
     colors[NamedColor::DimForeground] = colors[NamedColor::DimBlack];
+
+    colors
+}
+
+/// Paleta de um tema do Chube. As cores apagadas (`Dim*`) são as normais a 2/3.
+pub fn from_palette(palette: &crate::themes::TerminalPalette) -> Colors {
+    let mut colors = auto_colors();
+
+    let encode_rgb = |data: u32| -> Rgb {
+        Rgb {
+            r: (data >> 16) as u8,
+            g: (data >> 8) as u8,
+            b: data as u8,
+        }
+    };
+    let dim = |data: u32| -> Rgb {
+        let rgb = encode_rgb(data);
+        Rgb {
+            r: (u16::from(rgb.r) * 2 / 3) as u8,
+            g: (u16::from(rgb.g) * 2 / 3) as u8,
+            b: (u16::from(rgb.b) * 2 / 3) as u8,
+        }
+    };
+
+    let normal = [
+        NamedColor::Black,
+        NamedColor::Red,
+        NamedColor::Green,
+        NamedColor::Yellow,
+        NamedColor::Blue,
+        NamedColor::Magenta,
+        NamedColor::Cyan,
+        NamedColor::White,
+    ];
+    let bright = [
+        NamedColor::BrightBlack,
+        NamedColor::BrightRed,
+        NamedColor::BrightGreen,
+        NamedColor::BrightYellow,
+        NamedColor::BrightBlue,
+        NamedColor::BrightMagenta,
+        NamedColor::BrightCyan,
+        NamedColor::BrightWhite,
+    ];
+    let dimmed = [
+        NamedColor::DimBlack,
+        NamedColor::DimRed,
+        NamedColor::DimGreen,
+        NamedColor::DimYellow,
+        NamedColor::DimBlue,
+        NamedColor::DimMagenta,
+        NamedColor::DimCyan,
+        NamedColor::DimWhite,
+    ];
+    for i in 0..8 {
+        colors[normal[i]] = Some(encode_rgb(palette.ansi[i]));
+        colors[bright[i]] = Some(encode_rgb(palette.ansi[i + 8]));
+        colors[dimmed[i]] = Some(dim(palette.ansi[i]));
+    }
+
+    colors[NamedColor::Foreground] = Some(encode_rgb(palette.foreground));
+    colors[NamedColor::Cursor] = Some(encode_rgb(palette.cursor));
+    colors[NamedColor::BrightForeground] = Some(encode_rgb(palette.foreground));
+    colors[NamedColor::DimForeground] = Some(dim(palette.foreground));
 
     colors
 }

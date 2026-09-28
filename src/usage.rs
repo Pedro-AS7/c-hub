@@ -7,6 +7,9 @@
 //! Current session: 34% used · resets Sep 27, 12:50am (America/Sao_Paulo)
 //! Current week (all models): 29% used · resets Sep 30, 5am (America/Sao_Paulo)
 //! ```
+//!
+//! Do mesmo jeito, `/context` com `--model` dá o tamanho da janela de contexto de um modelo
+//! (`**Tokens:** 11.3k / 1m (1%)`), que o histórico da sessão não grava.
 
 use std::process::Stdio;
 use std::time::Duration;
@@ -35,8 +38,30 @@ pub struct Limit {
 }
 
 pub async fn fetch() -> Result<Vec<Limit>, String> {
-    let output = tokio::process::Command::new(claude_bin())
-        .args(["-p", "--no-session-persistence", "--output-format", "json", "/usage"])
+    let text = run_local("/usage", None).await?;
+    let limits = parse(&text);
+    if limits.is_empty() {
+        let first_line = text.lines().next().unwrap_or("resposta vazia");
+        return Err(format!("não achei os limites no /usage: {first_line}"));
+    }
+    Ok(limits)
+}
+
+/// Tamanho da janela de contexto de `model`, em tokens.
+pub async fn context_window(model: String) -> Result<u32, String> {
+    let text = run_local("/context", Some(&model)).await?;
+    parse_window(&text).ok_or_else(|| format!("não achei a janela de contexto no /context de {model}"))
+}
+
+/// Roda um comando `/…` local do Claude Code e devolve o texto da saída.
+async fn run_local(command: &str, model: Option<&str>) -> Result<String, String> {
+    let mut cmd = tokio::process::Command::new(claude_bin());
+    cmd.args(["-p", "--no-session-persistence", "--output-format", "json"]);
+    if let Some(model) = model {
+        cmd.args(["--model", model]);
+    }
+    let output = cmd
+        .arg(command)
         .current_dir(home_dir())
         .env_remove("ANTHROPIC_API_KEY")
         .stdin(Stdio::null())
@@ -46,18 +71,26 @@ pub async fn fetch() -> Result<Vec<Limit>, String> {
         .output();
     let output = tokio::time::timeout(TIMEOUT, output)
         .await
-        .map_err(|_| "o /usage demorou demais".to_owned())?
+        .map_err(|_| format!("o {command} demorou demais"))?
         .map_err(|err| format!("não consegui rodar o claude: {err}"))?;
 
     let value: Value = serde_json::from_slice(&output.stdout)
-        .map_err(|_| "resposta inesperada do /usage".to_owned())?;
-    let text = value["result"].as_str().unwrap_or_default();
-    let limits = parse(text);
-    if limits.is_empty() {
-        let first_line = text.lines().next().unwrap_or("resposta vazia");
-        return Err(format!("não achei os limites no /usage: {first_line}"));
-    }
-    Ok(limits)
+        .map_err(|_| format!("resposta inesperada do {command}"))?;
+    Ok(value["result"].as_str().unwrap_or_default().to_owned())
+}
+
+/// `**Tokens:** 11.3k / 1m (1%)` → 1 000 000.
+fn parse_window(text: &str) -> Option<u32> {
+    let line = text.lines().find(|line| line.contains("Tokens:"))?;
+    let (_, rest) = line.split_once(" / ")?;
+    let size = rest.split_whitespace().next()?.to_ascii_lowercase();
+    let (number, scale) = match size.chars().last()? {
+        'k' => (&size[..size.len() - 1], 1_000.0),
+        'm' => (&size[..size.len() - 1], 1_000_000.0),
+        _ => (size.as_str(), 1.0),
+    };
+    let window = number.parse::<f64>().ok()? * scale;
+    (window >= 1.0).then(|| window.round() as u32)
 }
 
 fn parse(text: &str) -> Vec<Limit> {
@@ -125,6 +158,15 @@ pub fn describe_reset(time: chrono::DateTime<Local>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn le_a_janela_do_context() {
+        let text = "## Context Usage\n\n**Model:** claude-opus-5-5  \n**Tokens:** 11.3k / 1m (1%)\n";
+        assert_eq!(parse_window(text), Some(1_000_000));
+        assert_eq!(parse_window("**Tokens:** 17.8k / 200k (9%)"), Some(200_000));
+        assert_eq!(parse_window("**Tokens:** 0 / 1.5m (0%)"), Some(1_500_000));
+        assert_eq!(parse_window("sem janela"), None);
+    }
 
     #[test]
     fn le_a_saida_do_usage() {

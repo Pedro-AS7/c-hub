@@ -187,7 +187,7 @@ pub fn stats(session_id: &str) -> Option<Stats> {
 }
 
 /// Acha o `.jsonl` da sessão em qualquer pasta de `~/.claude/projects`.
-fn session_file(session_id: &str) -> Option<PathBuf> {
+pub fn session_file(session_id: &str) -> Option<PathBuf> {
     let name = format!("{session_id}.jsonl");
     fs::read_dir(home_dir().join(".claude/projects"))
         .ok()?

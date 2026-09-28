@@ -5,11 +5,14 @@ use cosmic::widget::text_editor;
 
 use crate::claude::{Mode, Start};
 use crate::commands::Command;
+use crate::restore::OpenChat;
 use crate::sessions::SavedSession;
 use crate::term::{self, Terminal};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Status {
+    /// Restaurado da última execução: o `claude` só abre quando o chat for selecionado.
+    Suspended,
     Starting,
     Working,
     /// O Claude Code espera uma resposta (permissão, pergunta).
@@ -21,6 +24,7 @@ pub enum Status {
 impl Status {
     pub fn label(self) -> &'static str {
         match self {
+            Status::Suspended => "em espera",
             Status::Starting => "iniciando",
             Status::Working => "trabalhando",
             Status::Waiting => "precisa de você",
@@ -107,6 +111,30 @@ impl Chat {
             Some(saved.id.clone()),
             saved.title.clone(),
         )
+    }
+
+    /// Chat aberto na última execução, em espera até ser selecionado. Sem o `.jsonl` (sessão
+    /// sem nenhuma mensagem, ou apagada pelo Claude Code), o `--resume` falharia: volta como
+    /// chat novo na mesma pasta.
+    pub fn restore(id: term::TabId, open: &OpenChat, saved: bool) -> Self {
+        let mut chat = if saved {
+            let mut chat = Self::with_start(
+                id,
+                open.cwd.clone(),
+                open.model.clone(),
+                Start::Resume {
+                    session_id: open.session_id.clone(),
+                },
+                Some(open.session_id.clone()),
+                open.title.clone(),
+            );
+            chat.parent = open.parent.clone();
+            chat
+        } else {
+            Self::new(id, open.cwd.clone(), open.model.clone(), None)
+        };
+        chat.status = Status::Suspended;
+        chat
     }
 
     /// Sub-chat: nova sessão que começa com todo o contexto desta.

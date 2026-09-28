@@ -1,20 +1,27 @@
-use std::collections::HashSet;
+use std::borrow::Cow;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Duration;
 
 use cosmic::app::{Core, Task};
 use cosmic::iced::keyboard::{Key, key::Named};
-use cosmic::iced::{Alignment, Length, Subscription};
+use cosmic::iced::font::Weight;
+use cosmic::iced::widget::scrollable;
+use cosmic::iced::widget::text::Wrapping;
+use cosmic::iced::{Alignment, Background, Border, Color, Font, Length, Radians, Shadow, Subscription};
 use cosmic::widget::{self, pane_grid, segmented_button, text_editor, tooltip};
 use cosmic::{Application, ApplicationExt, Element, theme};
 
 use crate::chat::{Chat, ModeChange, Status};
-use crate::claude::{self, Mode};
+use crate::claude::{self, Mode, Start};
 use crate::commands::{self, Command};
 use crate::dirs;
+use crate::restore::{self, OpenChat, OpenChats};
 use crate::sessions::{self, Running, SavedSession, Stats};
+use crate::shortcuts::{self, Shortcut};
 use crate::term::{self, Terminal};
+use crate::themes::Theme;
 use crate::usage::{self, Limit, Window};
 
 /// Intervalo de atualização automática do painel de uso.
@@ -27,10 +34,20 @@ const TITLE_MAX_CHARS: usize = 40;
 const SUBMIT_DELAY: Duration = Duration::from_millis(80);
 /// Espera entre um Shift+Tab e a leitura do modo na tela.
 const MODE_STEP_DELAY: Duration = Duration::from_millis(250);
+/// Tempo máximo esperando o `claude` de um chat sair antes de abrir a sessão no COSMIC Terminal.
+const EXIT_WAIT: Duration = Duration::from_secs(5);
 /// Mais Shift+Tab do que isso e o modo pedido não está no ciclo.
 const MODE_MAX_STEPS: u8 = 6;
 /// Altura máxima do campo de mensagem; acima disso, ele rola.
 const COMPOSER_MAX_HEIGHT: f32 = 360.0;
+/// Tamanho do texto da interface, toda em fonte mono, como no terminal.
+const TEXT_SIZE: f32 = 13.0;
+/// Largura de um caractere da fonte mono, em relação ao tamanho (0,6 na Noto Sans Mono e na
+/// maioria das mono); usada para saber quantos caracteres cabem numa barra.
+const MONO_ADVANCE: f32 = 0.6;
+const TAB_TITLE_MAX_CHARS: usize = 24;
+/// Altura do cabeçalho das seções: duas linhas, como o do chat (título e pasta/modo).
+const HEADER_HEIGHT: f32 = 2.0 * TEXT_SIZE * 1.4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Section {
@@ -56,7 +73,16 @@ pub enum Message {
     SubChat,
     ReopenChat,
     CloseChat(usize),
+    /// Leva a sessão do chat em foco para o COSMIC Terminal.
+    OpenInTerminal,
+    /// Se a sessão do chat já tem `.jsonl` (sem ele, o `--resume` falha).
+    OpenInTerminalChecked(term::TabId, bool),
+    OpenedInTerminal(Result<(), String>),
     SetMode(usize),
+    ModeMenu(bool),
+    /// Tema escolhido (índice em `Theme::ALL`).
+    SetTheme(usize),
+    ThemeMenu(bool),
     ModeStep(term::TabId),
     ComposerAction(text_editor::Action),
     ComposerSend,
@@ -70,15 +96,28 @@ pub enum Message {
     OpenLink(String),
     RefreshInfo,
     UsageFetched(Result<Vec<Limit>, String>),
+    ContextWindowFetched(String, Option<u32>),
     PaneResized(pane_grid::ResizeEvent),
     HideSection(Section),
     ShowSection(Section),
     NewTerminalTab,
+    /// Roda do mouse sobre as abas do terminal (a rolagem delas é só horizontal).
+    TerminalTabsWheel(f32),
     TerminalTabActivated(segmented_button::Entity),
     TerminalTabClosed(segmented_button::Entity),
     TermEventTx(term::EventSender),
     TermEvent(term::TabId, term::Event),
+    Shortcut(Shortcut),
+    /// Dá o foco do teclado ao terminal da seção (mostrando-a, se escondida).
+    FocusSection(Section),
+    DragWindow,
+    ToggleMaximize,
+    Minimize,
+    CloseWindow,
 }
+
+/// Pasta atual do shell de uma aba do terminal (dado da aba no `segmented_button::Model`).
+struct TabDir(PathBuf);
 
 /// Estado de um chat lido do disco pelo `Message::Poll`.
 #[derive(Clone, Debug)]
@@ -102,8 +141,13 @@ pub struct App {
     focused: usize,
     default_dir: PathBuf,
     model: Option<String>,
-    /// Id do campo de mensagem do chat, para dar foco ao trocar de chat.
+    /// Id do campo de mensagem do chat (hoje fora da tela).
     composer_id: widget::Id,
+    /// Ids dos terminais na tela (o do chat em foco e o da aba ativa), para dar o foco a eles.
+    chat_terminal_id: widget::Id,
+    tab_terminal_id: widget::Id,
+    /// Id da rolagem horizontal das abas do terminal.
+    terminal_tabs_id: widget::Id,
     polling: bool,
     panes: pane_grid::State<Section>,
     sidebar_visible: bool,
@@ -126,10 +170,21 @@ pub struct App {
     usage_updated: Option<String>,
     usage_error: Option<String>,
     fetching_usage: bool,
+    /// Janela de contexto de cada modelo, pelo `/context`; `None` enquanto busca ou se falhou
+    /// (não tenta de novo a cada `Poll`).
+    context_windows: HashMap<String, Option<u32>>,
     /// Sessões salvas mostradas no painel lateral; `None` enquanto carrega.
     saved_sessions: Option<Vec<SavedSession>>,
     /// Diretórios abertos na lista de sessões salvas.
     expanded_dirs: HashSet<PathBuf>,
+    /// Menu do seletor de modo aberto.
+    mode_menu: bool,
+    /// Menu de temas aberto.
+    theme_menu: bool,
+    /// Aviso mostrado abaixo do cabeçalho do chat (ex.: falha ao abrir no COSMIC Terminal).
+    notice: Option<String>,
+    /// Última lista de chats gravada (`restore`), para só gravar quando mudar.
+    open_chats: OpenChats,
 }
 
 impl Application for App {
@@ -161,6 +216,9 @@ impl Application for App {
             default_dir,
             model: flags.model,
             composer_id: widget::Id::unique(),
+            chat_terminal_id: widget::Id::unique(),
+            tab_terminal_id: widget::Id::unique(),
+            terminal_tabs_id: widget::Id::unique(),
             polling: false,
             panes: pane_grid::State::new(Section::Chat).0,
             sidebar_visible: true,
@@ -177,30 +235,170 @@ impl Application for App {
             usage_updated: None,
             usage_error: None,
             fetching_usage: false,
+            context_windows: HashMap::new(),
             saved_sessions: None,
             expanded_dirs: HashSet::new(),
+            mode_menu: false,
+            theme_menu: false,
+            notice: None,
+            open_chats: OpenChats::default(),
         };
+        // Sem a barra de título: o conteúdo ocupa a janela toda. Os cabeçalhos das seções
+        // arrastam a janela, e os botões dela ficam no cabeçalho da seção da direita.
+        app.core.window.show_headerbar = false;
+        app.core.window.content_container = false;
         app.rebuild_panes();
-        // O terminal do chat abre quando o canal de eventos chegar (`Message::TermEventTx`).
-        let id = app.take_terminal_id();
-        let chat = Chat::new(id, app.default_dir.clone(), app.model.clone(), None);
-        app.chats.push(chat);
-        app.set_header_title("Chube".into());
+        // Volta a lista de chats da última execução, em espera; o do foco abre quando o canal de
+        // eventos dos terminais chegar (`Message::TermEventTx`).
+        let open = restore::load();
+        for saved in &open.chats {
+            let id = app.take_terminal_id();
+            let has_file = sessions::session_file(&saved.session_id).is_some();
+            app.chats.push(Chat::restore(id, saved, has_file));
+        }
+        app.focused = open.focused.min(app.chats.len().saturating_sub(1));
+        app.open_chats = open;
 
         let title = match app.core.main_window_id() {
             Some(id) => app.set_window_title("Chube".into(), id),
             None => Task::none(),
         };
         let usage = app.refresh_usage();
-        (app, Task::batch([title, usage]))
+        // O tema escolhido vale antes de abrir qualquer terminal (as cores vêm dele).
+        let theme = Theme::load();
+        theme.make_current();
+        let theme = match theme {
+            Theme::System => Task::none(),
+            theme => cosmic::command::set_theme(theme.cosmic()),
+        };
+        (app, Task::batch([title, usage, theme]))
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
-        match message {
-            Message::SelectChat(index) => {
+        let task = self.handle(message);
+        // Qualquer mensagem pode trocar o chat em foco (selecionar, fechar, retomar…).
+        self.wake_focused();
+        self.save_open_chats();
+        task
+    }
+
+    fn subscription(&self) -> Subscription<Message> {
+        let mut subscriptions = vec![
+            cosmic::iced::time::every(REFRESH_EVERY).map(|_| Message::RefreshInfo),
+            Subscription::run(term_events),
+            // Também os eventos já capturados: os terminais capturam as teclas dos atalhos.
+            cosmic::iced::event::listen_with(|event, _status, _window| match event {
+                cosmic::iced::Event::Keyboard(cosmic::iced::keyboard::Event::KeyPressed {
+                    key,
+                    modifiers,
+                    physical_key,
+                    repeat: false,
+                    ..
+                }) => shortcuts::find(modifiers, &key, &physical_key).map(Message::Shortcut),
+                _ => None,
+            }),
+        ];
+        if self.chats.iter().any(Chat::is_alive) {
+            subscriptions.push(cosmic::iced::time::every(POLL_EVERY).map(|_| Message::Poll));
+        }
+        Subscription::batch(subscriptions)
+    }
+
+    fn context_drawer(&self) -> Option<cosmic::app::ContextDrawer<'_, Message>> {
+        if !self.core.window.show_context {
+            return None;
+        }
+        Some(
+            cosmic::app::context_drawer(self.sessions_list(), Message::CloseSessions)
+                .title("Sessões salvas"),
+        )
+    }
+
+    fn dialog(&self) -> Option<Element<'_, Message>> {
+        let input = self.new_chat_input.as_ref()?;
+        let space = theme::spacing();
+        let resolved = dirs::resolve(input, &self.focused_dir());
+
+        let preview = match &resolved {
+            Ok(path) => format!("→ {}", path.display()),
+            Err(error) => error.clone(),
+        };
+        let names: Vec<String> = dirs::shortcuts().into_iter().map(|(name, _)| name).collect();
+        let mut control = widget::Column::new()
+            .push(
+                widget::text_input("Diretório, atalho do fshort ou .", input)
+                    .id(self.new_chat_input_id.clone())
+                    .on_input(Message::NewChatInput)
+                    .on_submit(|_| Message::NewChatConfirm),
+            )
+            .push(widget::text::caption(preview))
+            .spacing(space.space_xs);
+        if !names.is_empty() {
+            control = control.push(widget::text::caption(format!(
+                "Atalhos: {}",
+                names.join(", ")
+            )));
+        }
+
+        Some(
+            widget::dialog()
+                .title("Nova sessão")
+                .body(format!(
+                    "\".\" usa a pasta do chat em foco ({}).",
+                    claude::display_path(&self.focused_dir())
+                ))
+                .control(control)
+                .primary_action(
+                    widget::button::suggested("Criar")
+                        .on_press_maybe(resolved.is_ok().then_some(Message::NewChatConfirm)),
+                )
+                .secondary_action(widget::button::standard("Cancelar").on_press(Message::NewChatCancel))
+                .tertiary_action(
+                    widget::button::text("Escolher pasta…").on_press(Message::NewChatBrowse),
+                )
+                .into(),
+        )
+    }
+
+    /// Nos temas próprios, a cor padrão do texto é a da paleta. O fundo fica transparente
+    /// (é pintado no `view`), também com a janela maximizada.
+    fn style(&self) -> Option<cosmic::iced::theme::Style> {
+        let palette = Theme::current().palette()?;
+        Some(cosmic::iced::theme::Style {
+            background_color: Color::TRANSPARENT,
+            text_color: palette.text,
+            icon_color: palette.text,
+        })
+    }
+
+    fn view(&self) -> Element<'_, Message> {
+        let space = theme::spacing();
+
+        widget::container(
+            pane_grid::PaneGrid::new(&self.panes, |_pane, section, _maximized| {
+                pane_grid::Content::new(self.section_view(*section))
+            })
+            .spacing(space.space_xxs)
+            .min_size(180)
+            .on_resize(10, Message::PaneResized),
+        )
+        .padding(space.space_xxs)
+        // Sem o `content_container` do libcosmic, o fundo da janela é daqui.
+        .class(theme::Container::custom(|theme| widget::container::Style {
+            background: Some(window_background(theme)),
+            ..Default::default()
+        }))
+        .into()
+    }
+}
+
+impl App {
+    fn handle(&mut self, message: Message) -> Task<Message> {
+        match message {            Message::SelectChat(index) => {
+                self.notice = None;
                 if index < self.chats.len() {
                     self.focused = index;
-                    return self.focus_composer();
+                    return self.focus_chat();
                 }
             }
             Message::NewChat => {
@@ -265,7 +463,7 @@ impl Application for App {
                 self.set_show_context(false);
                 if let Some(open) = self.chat_index_for_session(&saved.id) {
                     self.focused = open;
-                    return self.focus_composer();
+                    return self.focus_chat();
                 }
                 let id = self.take_terminal_id();
                 return self.open_chat(self.chats.len(), Chat::resume(id, &saved, self.model.clone()));
@@ -284,21 +482,71 @@ impl Application for App {
                     return self.open_chat(self.focused, chat);
                 }
             }
-            Message::CloseChat(index) => {
-                if index < self.chats.len() {
-                    // Descartar o `Terminal` fecha o PTY, e o `claude` recebe SIGHUP: sai
-                    // como no `/exit`, com a sessão salva.
-                    self.chats.remove(index);
-                    if index < self.focused {
-                        self.focused -= 1;
-                    }
-                    self.focused = self.focused.min(self.chats.len().saturating_sub(1));
-                    if !self.chats.is_empty() {
-                        return self.focus_composer();
-                    }
+            Message::CloseChat(index) => return self.close_chat(index),
+            Message::OpenInTerminal => {
+                self.notice = None;
+                let Some(chat) = self.chats.get(self.focused) else {
+                    return Task::none();
+                };
+                let Some(session_id) = chat.session_id.clone() else {
+                    return Task::none();
+                };
+                let id = chat.id;
+                return cosmic::task::future(async move {
+                    let saved = tokio::task::spawn_blocking(move || sessions::session_file(&session_id).is_some())
+                        .await
+                        .unwrap_or(false);
+                    Message::OpenInTerminalChecked(id, saved)
+                });
+            }
+            Message::OpenInTerminalChecked(id, saved) => {
+                let Some(index) = self.chats.iter().position(|chat| chat.id == id) else {
+                    return Task::none();
+                };
+                let chat = &self.chats[index];
+                let Some(session_id) = chat.session_id.clone().filter(|_| saved) else {
+                    self.notice = Some("a sessão ainda não foi salva: mande uma mensagem antes.".into());
+                    return Task::none();
+                };
+                let pid = chat.pid();
+                let cwd = chat.cwd.clone();
+                let command = claude::command(&Start::Resume { session_id }, chat.model.as_deref(), None);
+                let close = self.close_chat(index);
+                let open = cosmic::task::future(async move {
+                    Message::OpenedInTerminal(open_in_terminal(pid, cwd, command).await)
+                });
+                return Task::batch([close, open]);
+            }
+            Message::OpenedInTerminal(result) => {
+                if let Err(error) = result {
+                    self.notice = Some(format!("não consegui abrir o COSMIC Terminal: {error}"));
                 }
             }
+            Message::ModeMenu(open) => self.mode_menu = open,
+            Message::ThemeMenu(open) => self.theme_menu = open,
+            Message::SetTheme(index) => {
+                self.theme_menu = false;
+                let Some(chosen) = Theme::ALL.get(index).copied() else {
+                    return Task::none();
+                };
+                chosen.make_current();
+                if let Err(error) = chosen.save() {
+                    log::error!("não consegui gravar o tema: {error}");
+                }
+                // Os terminais abertos trocam de cor na hora; os novos já nascem com o tema.
+                let cosmic_theme = chosen.cosmic();
+                let chats = self.chats.iter().filter_map(|chat| chat.terminal.as_ref());
+                let tabs = self
+                    .terminal_tabs
+                    .iter()
+                    .filter_map(|entity| self.terminal_tabs.data::<Mutex<Terminal>>(entity));
+                for terminal in chats.chain(tabs) {
+                    term::apply_theme(&mut terminal.lock().unwrap(), &cosmic_theme);
+                }
+                return cosmic::command::set_theme(cosmic_theme);
+            }
             Message::SetMode(index) => {
+                self.mode_menu = false;
                 let Some(chat) = self.chats.get_mut(self.focused) else {
                     return Task::none();
                 };
@@ -361,7 +609,7 @@ impl Application for App {
                     chat.composer
                         .perform(text_editor::Action::Move(text_editor::Motion::DocumentEnd));
                 }
-                return self.focus_composer();
+                return self.focus_chat();
             }
             Message::ComposerSend => {
                 let Some(chat) = self.chats.get_mut(self.focused) else {
@@ -398,6 +646,7 @@ impl Application for App {
             Message::Polled(list) => {
                 self.polling = false;
                 self.apply_poll(list);
+                return self.fetch_context_window();
             }
             Message::OpenLink(url) => {
                 let _ = std::process::Command::new("xdg-open").arg(url).spawn();
@@ -413,6 +662,9 @@ impl Application for App {
                     }
                     Err(error) => self.usage_error = Some(error),
                 }
+            }
+            Message::ContextWindowFetched(model, window) => {
+                self.context_windows.insert(model, window);
             }
             Message::PaneResized(event) => {
                 // Com o painel da esquerda visível, a divisão da raiz é a dele.
@@ -445,7 +697,20 @@ impl Application for App {
                 }
                 self.rebuild_panes();
             }
-            Message::NewTerminalTab => self.add_terminal_tab(),
+            Message::NewTerminalTab => {
+                self.add_terminal_tab();
+                // A aba nova entra no fim: rola até ela.
+                return cosmic::iced::widget::scrollable::snap_to(
+                    self.terminal_tabs_id.clone(),
+                    scrollable::RelativeOffset { x: Some(1.0), y: None },
+                );
+            }
+            Message::TerminalTabsWheel(delta) => {
+                return cosmic::iced::widget::scrollable::scroll_by(
+                    self.terminal_tabs_id.clone(),
+                    scrollable::AbsoluteOffset { x: delta, y: 0.0 },
+                );
+            }
             Message::TerminalTabActivated(id) => self.terminal_tabs.activate(id),
             // Remover a aba descarta o `Terminal`, que encerra o shell.
             Message::TerminalTabClosed(id) => self.terminal_tabs.remove(id),
@@ -459,98 +724,60 @@ impl Application for App {
                     for index in 0..self.chats.len() {
                         self.spawn_chat_terminal(index);
                     }
-                    return self.focus_composer();
+                    return self.focus_chat();
                 }
             }
             Message::TermEvent(id, event) => return self.handle_term_event(id, event),
+            Message::Shortcut(shortcut) => return self.handle_shortcut(shortcut),
+            Message::FocusSection(section) => {
+                let show = match section {
+                    Section::Chat if !self.chat_visible => self.update(Message::ShowSection(Section::Chat)),
+                    Section::Terminal if !self.terminal_visible => {
+                        self.update(Message::ShowSection(Section::Terminal))
+                    }
+                    _ => Task::none(),
+                };
+                let focus = match section {
+                    Section::Terminal => {
+                        if self.terminal_tabs.len() == 0 {
+                            self.add_terminal_tab();
+                        }
+                        self.focus_terminal_tab()
+                    }
+                    _ => self.focus_chat(),
+                };
+                return Task::batch([show, focus]);
+            }
+            Message::DragWindow => return self.core.drag(None),
+            Message::ToggleMaximize => return self.core.toggle_maximize(None),
+            Message::Minimize => return self.core.minimize(None),
+            Message::CloseWindow => {
+                if let Some(id) = self.core.main_window_id() {
+                    return cosmic::iced::window::close(id);
+                }
+            }
         }
         Task::none()
     }
 
-    fn subscription(&self) -> Subscription<Message> {
-        let mut subscriptions = vec![
-            cosmic::iced::time::every(REFRESH_EVERY).map(|_| Message::RefreshInfo),
-            Subscription::run(term_events),
-        ];
-        if self.chats.iter().any(Chat::is_alive) {
-            subscriptions.push(cosmic::iced::time::every(POLL_EVERY).map(|_| Message::Poll));
+    /// Tira o chat da lista. Descartar o `Terminal` fecha o PTY, e o `claude` recebe SIGHUP:
+    /// sai como no `/exit`, com a sessão salva.
+    fn close_chat(&mut self, index: usize) -> Task<Message> {
+        if index >= self.chats.len() {
+            return Task::none();
         }
-        Subscription::batch(subscriptions)
-    }
-
-    fn context_drawer(&self) -> Option<cosmic::app::ContextDrawer<'_, Message>> {
-        if !self.core.window.show_context {
-            return None;
+        self.chats.remove(index);
+        if index < self.focused {
+            self.focused -= 1;
         }
-        Some(
-            cosmic::app::context_drawer(self.sessions_list(), Message::CloseSessions)
-                .title("Sessões salvas"),
-        )
-    }
-
-    fn dialog(&self) -> Option<Element<'_, Message>> {
-        let input = self.new_chat_input.as_ref()?;
-        let space = theme::spacing();
-        let resolved = dirs::resolve(input, &self.focused_dir());
-
-        let preview = match &resolved {
-            Ok(path) => format!("→ {}", path.display()),
-            Err(error) => error.clone(),
-        };
-        let names: Vec<String> = dirs::shortcuts().into_iter().map(|(name, _)| name).collect();
-        let mut control = widget::Column::new()
-            .push(
-                widget::text_input("Diretório, atalho do fshort ou .", input)
-                    .id(self.new_chat_input_id.clone())
-                    .on_input(Message::NewChatInput)
-                    .on_submit(|_| Message::NewChatConfirm),
-            )
-            .push(widget::text::caption(preview))
-            .spacing(space.space_xs);
-        if !names.is_empty() {
-            control = control.push(widget::text::caption(format!(
-                "Atalhos: {}",
-                names.join(", ")
-            )));
+        self.focused = self.focused.min(self.chats.len().saturating_sub(1));
+        if self.chats.is_empty() {
+            Task::none()
+        } else {
+            self.focus_chat()
         }
-
-        Some(
-            widget::dialog()
-                .title("Nova sessão")
-                .body(format!(
-                    "\".\" usa a pasta do chat em foco ({}).",
-                    claude::display_path(&self.focused_dir())
-                ))
-                .control(control)
-                .primary_action(
-                    widget::button::suggested("Criar")
-                        .on_press_maybe(resolved.is_ok().then_some(Message::NewChatConfirm)),
-                )
-                .secondary_action(widget::button::standard("Cancelar").on_press(Message::NewChatCancel))
-                .tertiary_action(
-                    widget::button::text("Escolher pasta…").on_press(Message::NewChatBrowse),
-                )
-                .into(),
-        )
     }
 
-    fn view(&self) -> Element<'_, Message> {
-        let space = theme::spacing();
-
-        widget::container(
-            pane_grid::PaneGrid::new(&self.panes, |_pane, section, _maximized| {
-                pane_grid::Content::new(self.section_view(*section))
-            })
-            .spacing(space.space_s)
-            .min_size(180)
-            .on_resize(10, Message::PaneResized),
-        )
-        .padding([0, space.space_s, space.space_s, space.space_s])
-        .into()
-    }
-}
-
-impl App {
     fn take_terminal_id(&mut self) -> term::TabId {
         self.next_terminal_id += 1;
         self.next_terminal_id
@@ -563,6 +790,25 @@ impl App {
         }
         self.fetching_usage = true;
         cosmic::task::future(async { Message::UsageFetched(usage::fetch().await) })
+    }
+
+    /// Busca a janela de contexto do modelo do chat em foco, se ainda não foi buscada.
+    fn fetch_context_window(&mut self) -> Task<Message> {
+        let Some(model) = self.chats.get(self.focused).and_then(|chat| chat.active_model.clone())
+        else {
+            return Task::none();
+        };
+        if self.context_windows.contains_key(&model) {
+            return Task::none();
+        }
+        self.context_windows.insert(model.clone(), None);
+        cosmic::task::future(async move {
+            let window = usage::context_window(model.clone()).await;
+            if let Err(error) = &window {
+                eprintln!("chube: {error}");
+            }
+            Message::ContextWindowFetched(model, window.ok())
+        })
     }
 
     /// Refaz o layout com as seções visíveis, mantendo as proporções.
@@ -603,7 +849,7 @@ impl App {
         self.chats.insert(index, chat);
         self.focused = index;
         self.spawn_chat_terminal(index);
-        self.focus_composer()
+        self.focus_chat()
     }
 
     /// Abre o terminal do chat rodando o `claude`, se o canal de eventos já existe.
@@ -612,7 +858,7 @@ impl App {
             return;
         };
         let chat = &mut self.chats[index];
-        if chat.terminal.is_some() || !chat.is_alive() {
+        if chat.terminal.is_some() || !chat.is_alive() || chat.status == Status::Suspended {
             return;
         }
         let command = claude::command(&chat.start, chat.model.as_deref(), chat.prompt.take().as_deref());
@@ -625,8 +871,105 @@ impl App {
         }
     }
 
-    fn focus_composer(&self) -> Task<Message> {
-        widget::text_input::focus(self.composer_id.clone())
+    /// Abre o `claude` do chat em foco se ele estava em espera (restaurado ao abrir o app).
+    fn wake_focused(&mut self) {
+        let Some(chat) = self.chats.get_mut(self.focused) else {
+            return;
+        };
+        if chat.status == Status::Suspended {
+            chat.status = Status::Starting;
+            self.spawn_chat_terminal(self.focused);
+        }
+    }
+
+    /// Grava a lista de chats se ela mudou. Arquivo pequeno e só quando muda: direto, sem
+    /// `spawn_blocking`, para as gravações não trocarem de ordem.
+    fn save_open_chats(&mut self) {
+        // Sub-chat cujo id ainda não apareceu fica de fora até aparecer.
+        let with_id: Vec<(usize, &Chat)> = self
+            .chats
+            .iter()
+            .enumerate()
+            .filter(|(_, chat)| chat.session_id.is_some())
+            .collect();
+        let open = OpenChats {
+            focused: with_id
+                .iter()
+                .position(|(index, _)| *index == self.focused)
+                .unwrap_or(0),
+            chats: with_id
+                .iter()
+                .map(|(_, chat)| OpenChat {
+                    session_id: chat.session_id.clone().unwrap_or_default(),
+                    cwd: chat.cwd.clone(),
+                    title: chat.title.clone(),
+                    model: chat.model.clone(),
+                    parent: chat.parent.clone(),
+                })
+                .collect(),
+        };
+        if open == self.open_chats {
+            return;
+        }
+        if let Err(error) = restore::save(&open) {
+            log::error!("não consegui gravar a lista de chats: {error}");
+        }
+        self.open_chats = open;
+    }
+
+    /// Foco do teclado no terminal do chat em foco (tira dos outros widgets).
+    fn focus_chat(&self) -> Task<Message> {
+        cosmic::iced::widget::operation::focus(self.chat_terminal_id.clone())
+    }
+
+    fn focus_terminal_tab(&self) -> Task<Message> {
+        cosmic::iced::widget::operation::focus(self.tab_terminal_id.clone())
+    }
+
+    fn handle_shortcut(&mut self, shortcut: Shortcut) -> Task<Message> {
+        let toggle = |visible: bool, section| {
+            if visible {
+                Message::HideSection(section)
+            } else {
+                Message::ShowSection(section)
+            }
+        };
+        match shortcut {
+            Shortcut::NewChat => self.update(Message::NewChat),
+            Shortcut::ToggleSidebar => self.update(toggle(self.sidebar_visible, Section::Sidebar)),
+            Shortcut::ToggleChat => {
+                let task = self.update(toggle(self.chat_visible, Section::Chat));
+                // Escondido o chat, o teclado vai para o terminal; mostrado, volta a ele.
+                let focus = if self.chat_visible { self.focus_chat() } else { self.focus_terminal_tab() };
+                Task::batch([task, focus])
+            }
+            Shortcut::ToggleTerminal => {
+                let task = self.update(toggle(self.terminal_visible, Section::Terminal));
+                let focus = if self.terminal_visible { self.focus_terminal_tab() } else { self.focus_chat() };
+                Task::batch([task, focus])
+            }
+            Shortcut::PreviousChat | Shortcut::NextChat if !self.chats.is_empty() => {
+                // Dá a volta nas pontas, como as abas do tmux.
+                let len = self.chats.len();
+                let index = match shortcut {
+                    Shortcut::PreviousChat => (self.focused + len - 1) % len,
+                    _ => (self.focused + 1) % len,
+                };
+                self.update(Message::SelectChat(index))
+            }
+            Shortcut::PreviousChat | Shortcut::NextChat => Task::none(),
+            Shortcut::SwitchFocus => {
+                // Com o terminal do chat em foco, vai para o integrado; em qualquer outro caso
+                // (terminal integrado, nada em foco), vai para o chat.
+                cosmic::iced::widget::operation::is_focused(self.chat_terminal_id.clone()).map(|chat_focused| {
+                    cosmic::Action::App(Message::FocusSection(if chat_focused {
+                        Section::Terminal
+                    } else {
+                        Section::Chat
+                    }))
+                })
+            }
+        }
     }
 
     /// Lê o status de cada `claude` (e o contexto do chat em foco) fora da thread da UI.
@@ -713,21 +1056,41 @@ impl App {
             return;
         };
         let id = self.take_terminal_id();
+        let dir = self.focused_dir();
         let entity = self
             .terminal_tabs
             .insert()
             .text("Terminal")
             .closable()
             .data(id)
+            .data(TabDir(dir.clone()))
             .activate()
             .id();
-        match term::spawn(id, events, self.focused_dir(), None, &theme::active()) {
+        match term::spawn(id, events, dir, None, &theme::active()) {
             Ok(terminal) => self.terminal_tabs.data_set::<Mutex<Terminal>>(entity, terminal),
             Err(err) => {
                 log::error!("não consegui abrir o terminal: {err}");
                 self.terminal_tabs.text_set(entity, "Erro ao abrir");
             }
         }
+    }
+
+    /// Nome de cada aba, na ordem: a última pasta do shell; a segunda aba na mesma pasta vira
+    /// `chube 2`, a terceira `chube 3`…
+    fn terminal_tab_names(&self) -> Vec<String> {
+        let mut seen: HashMap<String, usize> = HashMap::new();
+        self.terminal_tabs
+            .iter()
+            .map(|entity| {
+                let name = self
+                    .terminal_tabs
+                    .data::<TabDir>(entity)
+                    .map_or_else(|| "terminal".to_owned(), |dir| dir_name(&dir.0));
+                let count = seen.entry(name.clone()).or_default();
+                *count += 1;
+                if *count == 1 { name } else { format!("{name} {count}") }
+            })
+            .collect()
     }
 
     fn terminal_entity(&self, id: term::TabId) -> Option<segmented_button::Entity> {
@@ -760,11 +1123,16 @@ impl App {
             return Task::none();
         };
         match event {
-            term::Event::Title(title) => {
-                self.terminal_tabs.text_set(entity, title);
-            }
-            term::Event::ResetTitle => {
-                self.terminal_tabs.text_set(entity, "Terminal");
+            // O zsh (oh-my-zsh) muda o título a cada prompt, inclusive depois de um `cd`: é a
+            // hora de reler a pasta do shell, que dá o nome da aba.
+            term::Event::Title(_) | term::Event::ResetTitle => {
+                let pid = self
+                    .terminal_tabs
+                    .data::<Mutex<Terminal>>(entity)
+                    .and_then(|terminal| terminal.lock().ok()?.pid());
+                if let Some(dir) = pid.and_then(|pid| std::fs::read_link(format!("/proc/{pid}/cwd")).ok()) {
+                    self.terminal_tabs.data_set(entity, TabDir(dir));
+                }
             }
             // O shell saiu (`exit`): fecha a aba.
             term::Event::Exit => self.terminal_tabs.remove(entity),
@@ -782,7 +1150,7 @@ impl App {
             Section::Sidebar => widget::Column::new()
                 .push(self.chats_card())
                 .push(self.info_card())
-                .spacing(theme::spacing().space_s)
+                .spacing(theme::spacing().space_xxs)
                 .height(Length::Fill)
                 .into(),
             Section::Chat => self.chat_section(),
@@ -792,70 +1160,63 @@ impl App {
 
     fn chats_card(&self) -> Element<'_, Message> {
         let space = theme::spacing();
+        let colors = Colors::get();
 
-        let mut list = widget::Column::new().spacing(space.space_xxs);
+        let mut list = widget::Column::new();
         for (index, chat) in self.chats.iter().enumerate() {
-            // Trabalhando / precisa de você viram badge; os outros status ficam no texto.
-            let mut subtitle = widget::Row::new()
-                .spacing(space.space_xxs)
-                .align_y(Alignment::Center);
-            let path = claude::display_path(&chat.cwd);
-            subtitle = match status_badge(chat.status) {
-                Some(badge) => subtitle.push(badge).push(widget::text::caption(path)),
-                None => subtitle.push(widget::text::caption(format!("{} · {path}", chat.status.label()))),
+            let selected = index == self.focused;
+            let (glyph, color) = status_glyph(chat.status, &colors);
+            let title = if selected {
+                bold(chat.title.as_str()).class(theme::Text::Color(colors.accent))
+            } else {
+                mono(chat.title.as_str())
             };
-            let item = widget::Row::new()
-                .push(
-                    widget::Column::new()
-                        .push(widget::text::body(chat.title.as_str()))
-                        .push(subtitle)
-                        .spacing(space.space_xxxs)
-                        .width(Length::Fill),
-                )
-                .push(icon_button(
-                    "window-close-symbolic",
-                    "Fechar este chat (como /exit)",
-                    Some(Message::CloseChat(index)),
-                ))
+            let first = widget::Row::new()
+                .push(tinted(if selected { "> " } else { "  " }, colors.accent))
+                .push(tinted(format!("{glyph} "), color))
+                // Cortado no container: sem ele, o texto sem quebra passa por baixo do `[x]`.
+                .push(widget::container(title.wrapping(Wrapping::None)).width(Length::Fill).clip(true))
+                .push(ascii_button("[x]", "Fechar este chat (como /exit)", Some(Message::CloseChat(index))))
                 .align_y(Alignment::Center);
+            // Trabalhando / precisa de você ficam na cor do status; os outros, apagados.
+            let status_color = match chat.status {
+                Status::Working | Status::Waiting => color,
+                _ => colors.dim,
+            };
+            let second = widget::Row::new()
+                .push(tinted(format!("    {} · ", claude::display_path(&chat.cwd)), colors.dim).wrapping(Wrapping::None))
+                .push(tinted(chat.status.label(), status_color).wrapping(Wrapping::None));
+            let item = widget::container(widget::Column::new().push(first).push(second))
+                .width(Length::Fill)
+                .clip(true);
             list = list.push(
-                widget::button::custom(item)
-                    .class(theme::Button::ListItem([8.0; 4]))
-                    .selected(index == self.focused)
-                    .padding([space.space_xxs, space.space_xxs, space.space_xxs, space.space_xs])
+                flat_button(item, selected)
+                    .padding([space.space_xxxs, 0])
                     .width(Length::Fill)
                     .on_press(Message::SelectChat(index)),
             );
         }
 
-        let new_chat = icon_button("list-add-symbolic", "Nova sessão", Some(Message::NewChat));
-
         let header = widget::Row::new()
-            .push(widget::text::heading("Chats ativos"))
+            .push(heading("chats"))
+            .push(tinted(format!(" [{}]", self.chats.len()), colors.dim))
             .push(horizontal_fill())
-            .push(icon_button(
-                "document-open-recent-symbolic",
-                "Sessões salvas",
-                Some(Message::ShowSessions),
-            ))
-            .push(icon_button(
-                "pan-start-symbolic",
-                "Esconder o painel",
+            .push(ascii_button("[+]", "Nova sessão (Ctrl+Shift+N)", Some(Message::NewChat)))
+            .push(ascii_button("[≡]", "Sessões salvas", Some(Message::ShowSessions)))
+            .push(shortcuts_help())
+            .push(ascii_button(
+                "[«]",
+                "Esconder o painel (Ctrl+Shift+1)",
                 Some(Message::HideSection(Section::Sidebar)),
             ))
+            .spacing(space.space_xxxs)
             .align_y(Alignment::Center);
 
         card(
             widget::Column::new()
-                .push(header)
+                .push(section_header(header))
                 .push(widget::scrollable(list).height(Length::Fill))
-                .push(
-                    widget::Row::new()
-                        .push(horizontal_fill())
-                        .push(new_chat)
-                        .align_y(Alignment::Center),
-                )
-                .spacing(space.space_xs),
+                .spacing(space.space_xxs),
         )
         .height(Length::FillPortion(3))
         .into()
@@ -863,7 +1224,12 @@ impl App {
 
     fn info_card(&self) -> Element<'_, Message> {
         let space = theme::spacing();
-        let context_tokens = self.chats.get(self.focused).map_or(0, |chat| chat.context_tokens);
+        let colors = Colors::get();
+        let focused = self.chats.get(self.focused);
+        let context_tokens = focused.map_or(0, |chat| chat.context_tokens);
+        let known_window = focused
+            .and_then(|chat| chat.active_model.as_ref())
+            .and_then(|model| self.context_windows.get(model).copied().flatten());
         let working = self
             .chats
             .iter()
@@ -871,73 +1237,79 @@ impl App {
             .count();
 
         let header = widget::Row::new()
-            .push(widget::text::heading("Uso"))
+            .push(heading("uso"))
             .push(horizontal_fill())
-            .push(icon_button(
-                "view-refresh-symbolic",
+            // Aqui e não em "# chats", que corta os últimos botões com o painel estreito.
+            .push(self.theme_selector())
+            .push(ascii_button(
+                "[↻]",
                 "Atualizar agora",
                 (!self.fetching_usage).then_some(Message::RefreshInfo),
             ))
             .align_y(Alignment::Center);
 
         let context = if context_tokens == 0 {
-            meter("Contexto do chat em foco", 0.0, "—".into(), None)
+            meter("contexto", None, None, None)
         } else {
-            // O histórico não diz o tamanho da janela: acima de 200 mil, só pode ser a de 1 milhão.
-            let window: u32 = if context_tokens > 200_000 { 1_000_000 } else { 200_000 };
+            // Enquanto o `/context` não responde, chuta 200 mil; acima disso, só pode ser 1 milhão
+            // (vale também para um `[1m]` opcional, que o nome do modelo no histórico não mostra).
+            let guess: u32 = if context_tokens > 200_000 { 1_000_000 } else { 200_000 };
+            let window = known_window.map_or(guess, |window| window.max(guess));
             meter(
-                "Contexto do chat em foco",
-                context_tokens as f32 / window as f32,
-                format!("{} / {} mil", thousands(context_tokens), window / 1000),
+                "contexto",
+                Some(context_tokens as f32 / window as f32),
+                Some(format!("{} / {}", short_tokens(context_tokens), short_tokens(window))),
                 None,
             )
         };
 
-        let mut body = widget::Column::new().push(context).spacing(space.space_s);
+        let mut body = widget::Column::new().push(context).spacing(space.space_xs);
         if self.limits.is_empty() {
             body = body
-                .push(meter("Limite de 5 horas", 0.0, "—".into(), None))
-                .push(meter("Limite semanal", 0.0, "—".into(), None));
+                .push(meter("limite 5h", None, None, None))
+                .push(meter("limite semanal", None, None, None));
         }
         for limit in &self.limits {
             let label = match &limit.window {
-                Window::Session => "Limite de 5 horas".to_owned(),
-                Window::Week(models) if models == "all models" => "Limite semanal".to_owned(),
-                Window::Week(models) => format!("Semanal ({models})"),
+                Window::Session => "limite 5h".to_owned(),
+                Window::Week(models) if models == "all models" => "limite semanal".to_owned(),
+                Window::Week(models) => format!("semanal ({models})"),
             };
             body = body.push(meter(
                 label,
-                limit.used,
-                format!("{:.0}%", limit.used * 100.0),
+                Some(limit.used),
+                None,
                 limit.resets.map(usage::describe_reset),
             ));
         }
-        body = body.push(widget::text::body(format!(
-            "{} chats abertos · {} trabalhando",
-            self.chats.len(),
-            working
-        )));
 
         let status = if self.fetching_usage {
-            "Atualizando…".to_owned()
+            tinted("atualizando…", colors.dim)
         } else if let Some(error) = &self.usage_error {
-            format!("Erro ao atualizar: {error}")
+            tinted(format!("erro ao atualizar: {error}"), colors.danger)
         } else if let Some(time) = &self.usage_updated {
-            format!("Atualizado às {time} · a cada 3 min")
+            tinted(format!("atualizado {time} · a cada 3 min"), colors.dim)
         } else {
-            "Ainda não atualizado".to_owned()
+            tinted("ainda não atualizado", colors.dim)
         };
-        body = body.push(widget::text::caption(status));
+        body = body.push(
+            widget::Column::new()
+                .push(tinted(
+                    format!("{} chats · {working} trabalhando", self.chats.len()),
+                    colors.dim,
+                ))
+                .push(status),
+        );
 
         card(
             widget::Column::new()
-                .push(header)
+                .push(section_header(header))
                 // Rola em vez de cortar quando a janela é baixa.
                 .push(
-                    widget::scrollable(body.padding([0, space.space_s, 0, 0]))
+                    widget::scrollable(body.padding([0, space.space_xs, 0, 0]))
                         .height(Length::Fill),
                 )
-                .spacing(space.space_s),
+                .spacing(space.space_xxs),
         )
         .height(Length::FillPortion(2))
         .into()
@@ -945,6 +1317,7 @@ impl App {
 
     fn chat_section(&self) -> Element<'_, Message> {
         let space = theme::spacing();
+        let colors = Colors::get();
         let Some(chat) = self.chats.get(self.focused) else {
             return self.no_chat_section();
         };
@@ -956,84 +1329,144 @@ impl App {
         if let Some(parent) = &chat.parent {
             details.push(format!("sub-chat de \"{parent}\""));
         }
-        let title = widget::Column::new()
-            .push(widget::text::heading(chat.title.as_str()))
-            .push(widget::text::caption(details.join(" · ")));
 
         let mut header = widget::Row::new();
         if !self.sidebar_visible {
             header = header.push(show_sidebar_button());
         }
         let can_fork = chat.session_id.is_some() && chat.status != Status::Starting;
-        header = header.push(title).push(horizontal_fill());
-        if chat.is_alive() {
-            // Modo de permissão; Shift+Tab no campo de mensagem também troca.
-            header = header.push(
-                widget::dropdown(&Mode::LABELS[..], chat.mode.map(Mode::index), Message::SetMode)
-                    .placeholder("Modo"),
-            );
-        }
+        let (glyph, color) = status_glyph(chat.status, &colors);
         header = header
-            .push(icon_button(
-                "edit-copy-symbolic",
+            .push(tinted(format!("{glyph} "), color))
+            .push(
+                widget::container(bold(chat.title.as_str()).wrapping(Wrapping::None))
+                    .width(Length::Fill)
+                    .clip(true),
+            )
+            .push(ascii_button(
+                "[fork]",
                 "Criar sub-chat com o contexto deste chat",
                 can_fork.then_some(Message::SubChat),
             ))
-            .push(icon_button(
-                "window-close-symbolic",
+            .push(ascii_button(
+                "[term]",
+                "Continuar esta sessão no COSMIC Terminal (fecha o chat aqui)",
+                can_fork.then_some(Message::OpenInTerminal),
+            ))
+            .push(ascii_button(
+                "[exit]",
                 "Fechar este chat (como /exit)",
                 Some(Message::CloseChat(self.focused)),
             ))
-            .push(self.chat_toggle_button())
-            .align_y(Alignment::Center)
-            .spacing(space.space_xxs);
+            .push(self.chat_toggle_button());
+        if !self.terminal_visible {
+            header = header.push(window_controls());
+        }
+        let mut second = widget::Row::new().push(
+            widget::container(tinted(format!("  {}", details.join(" · ")), colors.dim).wrapping(Wrapping::None))
+                .width(Length::Fill)
+                .clip(true),
+        );
+        if chat.is_alive() {
+            second = second.push(self.mode_selector(chat.mode));
+        }
+        let header = widget::Column::new()
+            .push(header.spacing(space.space_xxxs).align_y(Alignment::Center))
+            .push(second.align_y(Alignment::Center));
 
-        let mut column = widget::Column::new().push(header);
+        let mut column = widget::Column::new().push(section_header(header));
+        if let Some(notice) = &self.notice {
+            column = column.push(tinted(format!("! {notice}"), colors.warning));
+        }
         if !chat.is_alive() {
             let text = if chat.terminal.is_some() {
-                "O claude desta sessão foi encerrado."
+                "o claude desta sessão foi encerrado."
             } else {
-                "Não consegui abrir o claude."
+                "não consegui abrir o claude."
             };
             column = column.push(
-                widget::container(
-                    widget::Row::new()
-                        .push(widget::text::body(text).width(Length::Fill))
-                        .push(
-                            widget::button::standard("Reabrir sessão").on_press_maybe(
-                                chat.session_id.is_some().then_some(Message::ReopenChat),
-                            ),
-                        )
-                        .spacing(space.space_s)
-                        .align_y(Alignment::Center),
-                )
-                .padding(space.space_xs)
-                .width(Length::Fill)
-                .class(theme::Container::Secondary),
+                widget::Row::new()
+                    .push(tinted(format!("× {text}"), colors.warning).width(Length::Fill))
+                    .push(ascii_button(
+                        "[reabrir sessão]",
+                        "Retomar a sessão com --resume",
+                        chat.session_id.is_some().then_some(Message::ReopenChat),
+                    ))
+                    .align_y(Alignment::Center),
             );
         }
 
         let body: Element<'_, Message> = match &chat.terminal {
-            Some(terminal) => {
-                let current = theme::active();
-                let cosmic = current.cosmic();
-                term::terminal_box(terminal, &term::KEY_BINDS)
-                    .padding(space.space_xxs)
-                    .pane_border_radius(Some(cosmic.corner_radii.radius_s.into()))
-                    .on_open_hyperlink(Some(Box::new(Message::OpenLink)))
-                    .into()
-            }
-            None => widget::container(widget::text::body(if chat.is_alive() {
-                "Iniciando o Claude Code…"
-            } else {
-                ""
-            }))
+            Some(terminal) => terminal_view(terminal, self.chat_terminal_id.clone()),
+            None => widget::container(tinted(
+                if chat.is_alive() { "iniciando o claude code…" } else { "" },
+                colors.dim,
+            ))
             .center(Length::Fill)
             .into(),
         };
 
-        let column = column.push(body);
-        card(column.spacing(space.space_s)).into()
+        card(column.push(body).spacing(space.space_xxs)).into()
+    }
+
+    /// Modo de permissão, como no rodapé da TUI; Shift+Tab no terminal também troca.
+    fn mode_selector(&self, mode: Option<Mode>) -> Element<'_, Message> {
+        let colors = Colors::get();
+        let label = match mode {
+            Some(mode) => format!("[{} {} ▾]", mode_glyph(mode), Mode::LABELS[mode.index()].to_lowercase()),
+            None => "[modo ▾]".to_owned(),
+        };
+        let button = flat_button(mono(label), self.mode_menu)
+            .on_press(Message::ModeMenu(!self.mode_menu));
+        let mut popover = widget::popover(button)
+            .position(widget::popover::Position::Bottom)
+            .on_close(Message::ModeMenu(false));
+        if self.mode_menu {
+            let mut menu = widget::Column::new();
+            for (index, candidate) in Mode::ALL.iter().enumerate() {
+                let current = mode == Some(*candidate);
+                let row = widget::Row::new()
+                    .push(tinted(if current { "> " } else { "  " }, colors.accent))
+                    .push(mono(format!("{} {}", mode_glyph(*candidate), Mode::LABELS[index].to_lowercase())));
+                menu = menu.push(
+                    flat_button(row, current)
+                        .width(Length::Fill)
+                        .on_press(Message::SetMode(index)),
+                );
+            }
+            popover = popover.popup(menu_card(menu).width(Length::Fixed(220.0)));
+        }
+        popover.into()
+    }
+
+    /// `[◐]` com o menu de temas.
+    fn theme_selector(&self) -> Element<'_, Message> {
+        let colors = Colors::get();
+        let current = Theme::current();
+        let button = tooltip::tooltip(
+            flat_button(mono("[◐]"), self.theme_menu).on_press(Message::ThemeMenu(!self.theme_menu)),
+            widget::text::body(format!("Tema: {}", current.label())),
+            tooltip::Position::Bottom,
+        );
+        let mut popover = widget::popover(button)
+            .position(widget::popover::Position::Bottom)
+            .on_close(Message::ThemeMenu(false));
+        if self.theme_menu {
+            let mut menu = widget::Column::new().push(tinted("tema", colors.dim));
+            for (index, theme) in Theme::ALL.iter().enumerate() {
+                let selected = *theme == current;
+                let row = widget::Row::new()
+                    .push(tinted(if selected { "> " } else { "  " }, colors.accent))
+                    .push(mono(theme.label()));
+                menu = menu.push(
+                    flat_button(row, selected)
+                        .width(Length::Fill)
+                        .on_press(Message::SetTheme(index)),
+                );
+            }
+            popover = popover.popup(menu_card(menu).width(Length::Fixed(160.0)));
+        }
+        popover.into()
     }
 
     /// Campo de mensagem do chat: cresce com o texto; Enter envia, Shift+Enter quebra a linha.
@@ -1077,50 +1510,62 @@ impl App {
     /// Seção do chat depois de fechar o último.
     fn no_chat_section(&self) -> Element<'_, Message> {
         let space = theme::spacing();
+        let colors = Colors::get();
         let mut header = widget::Row::new();
         if !self.sidebar_visible {
             header = header.push(show_sidebar_button());
         }
-        let header = header
-            .push(widget::text::heading("Nenhum chat aberto"))
+        header = header
+            .push(heading("nenhum chat aberto"))
             .push(horizontal_fill())
             .push(self.chat_toggle_button())
-            .align_y(Alignment::Center)
-            .spacing(space.space_xxs);
+            .spacing(space.space_xxxs)
+            .align_y(Alignment::Center);
+        if !self.terminal_visible {
+            header = header.push(window_controls());
+        }
+        let notice = self
+            .notice
+            .as_ref()
+            .map(|notice| tinted(format!("! {notice}"), colors.warning));
         let body = widget::container(
-            widget::Row::new()
-                .push(widget::button::suggested("Nova sessão").on_press(Message::NewChat))
-                .push(widget::button::standard("Sessões salvas").on_press(Message::ShowSessions))
-                .spacing(space.space_s),
+            widget::Column::new()
+                .push_maybe(notice)
+                .push(tinted("$ chube --novo", colors.dim))
+                .push(ascii_button("[+] nova sessão", "Abrir o claude numa pasta", Some(Message::NewChat)))
+                .push(ascii_button("[≡] sessões salvas", "Retomar uma sessão", Some(Message::ShowSessions)))
+                .spacing(space.space_xxs),
         )
         .center(Length::Fill);
-        card(widget::Column::new().push(header).push(body).spacing(space.space_s)).into()
+        card(
+            widget::Column::new()
+                .push(section_header(header))
+                .push(body)
+                .spacing(space.space_xxs),
+        )
+        .into()
     }
 
     /// Esconde o chat ou, com o terminal escondido, mostra o terminal.
     fn chat_toggle_button(&self) -> Element<'_, Message> {
         if self.terminal_visible {
-            icon_button(
-                "pan-start-symbolic",
-                "Esconder o chat",
-                Some(Message::HideSection(Section::Chat)),
-            )
+            ascii_button("[«]", "Esconder o chat (Ctrl+Shift+2)", Some(Message::HideSection(Section::Chat)))
         } else {
-            icon_button(
-                "utilities-terminal-symbolic",
-                "Mostrar o terminal",
+            ascii_button(
+                "[>_]",
+                "Mostrar o terminal (Ctrl+Shift+3)",
                 Some(Message::ShowSection(Section::Terminal)),
             )
         }
     }
 
     fn sessions_list(&self) -> Element<'_, Message> {
-        let space = theme::spacing();
+        let colors = Colors::get();
         let Some(list) = &self.saved_sessions else {
-            return widget::text::body("Carregando…").into();
+            return tinted("carregando…", colors.dim).into();
         };
         if list.is_empty() {
-            return widget::text::body("Nenhuma sessão salva encontrada.").into();
+            return tinted("nenhuma sessão salva encontrada.", colors.dim).into();
         }
 
         // Agrupa por diretório; os grupos seguem a ordem da sessão mais recente de cada um.
@@ -1132,21 +1577,16 @@ impl App {
             }
         }
 
-        let mut column = widget::Column::new().spacing(space.space_xxs);
+        let mut column = widget::Column::new().spacing(theme::spacing().space_xxxs);
         for (dir, indices) in groups {
             let expanded = self.expanded_dirs.contains(dir);
-            let icon = if expanded { "pan-down-symbolic" } else { "pan-end-symbolic" };
             let header = widget::Row::new()
-                .push(widget::icon::from_name(icon).size(16))
-                .push(widget::text::heading(claude::display_path(dir)))
-                .push(horizontal_fill())
-                .push(widget::text::caption(indices.len().to_string()))
-                .spacing(space.space_xs)
-                .align_y(Alignment::Center);
+                .push(tinted(if expanded { "▾ " } else { "▸ " }, colors.accent))
+                .push(bold(claude::display_path(dir)).width(Length::Fill))
+                .push(tinted(format!("[{}]", indices.len()), colors.dim));
             column = column.push(
-                widget::button::custom(header)
-                    .class(theme::Button::Text)
-                    .padding([space.space_xs, space.space_xxs])
+                flat_button(header, false)
+                    .padding([theme::spacing().space_xxs, 0])
                     .width(Length::Fill)
                     .on_press(Message::ToggleDirGroup(dir.clone())),
             );
@@ -1160,7 +1600,7 @@ impl App {
     }
 
     fn saved_session_item<'a>(&self, index: usize, saved: &'a SavedSession) -> Element<'a, Message> {
-        let space = theme::spacing();
+        let colors = Colors::get();
         let open_here = self.chat_index_for_session(&saved.id).is_some();
         let mut details = sessions::relative_time(saved.modified);
         let blocked = match (&saved.running, open_here) {
@@ -1178,19 +1618,19 @@ impl App {
             .chat_index_for_session(&saved.id)
             .map(|index| self.chats[index].status)
             .or_else(|| saved.running.as_deref().and_then(Status::from_claude));
-        let mut subtitle = widget::Row::new()
-            .spacing(space.space_xxs)
-            .align_y(Alignment::Center);
-        if let Some(badge) = running.and_then(status_badge) {
-            subtitle = subtitle.push(badge);
-        }
+        let (glyph, color) = match running {
+            Some(status) => status_glyph(status, &colors),
+            None => ("·", colors.dim),
+        };
         let item = widget::Column::new()
-            .push(widget::text::body(saved.title.as_str()))
-            .push(subtitle.push(widget::text::caption(details)))
-            .spacing(space.space_xxxs);
-        widget::button::custom(item)
-            .class(theme::Button::ListItem([8.0; 4]))
-            .padding([space.space_xxs, space.space_m])
+            .push(
+                widget::Row::new()
+                    .push(tinted(format!("  {glyph} "), color))
+                    .push(mono(saved.title.as_str())),
+            )
+            .push(tinted(format!("    {details}"), colors.dim));
+        flat_button(item, false)
+            .padding([theme::spacing().space_xxxs, 0])
             .width(Length::Fill)
             .on_press_maybe((!blocked).then_some(Message::ResumeSession(index)))
             .into()
@@ -1198,20 +1638,34 @@ impl App {
 
     fn terminal_section(&self) -> Element<'_, Message> {
         let space = theme::spacing();
+        let colors = Colors::get();
 
         let toggle = if self.chat_visible {
-            icon_button(
-                "pan-end-symbolic",
-                "Esconder o terminal",
-                Some(Message::HideSection(Section::Terminal)),
-            )
+            ascii_button("[»]", "Esconder o terminal (Ctrl+Shift+3)", Some(Message::HideSection(Section::Terminal)))
         } else {
-            icon_button(
-                "pan-start-symbolic",
-                "Mostrar o chat",
-                Some(Message::ShowSection(Section::Chat)),
-            )
+            ascii_button("[«]", "Mostrar o chat (Ctrl+Shift+2)", Some(Message::ShowSection(Section::Chat)))
         };
+
+        // Abas com o nome da pasta do shell e um × para fechar.
+        let active = self.terminal_tabs.active();
+        let mut tabs = widget::Row::new();
+        for (entity, name) in self.terminal_tabs.iter().zip(self.terminal_tab_names()) {
+            let selected = entity == active;
+            let title = short_text(&name, TAB_TITLE_MAX_CHARS);
+            let label = if selected {
+                bold(title).class(theme::Text::Color(colors.accent))
+            } else {
+                mono(title)
+            }
+            .wrapping(Wrapping::None);
+            tabs = tabs
+                .push(flat_button(label, selected).on_press(Message::TerminalTabActivated(entity)))
+                .push(
+                    flat_button(tinted("×", colors.dim), selected)
+                        .on_press(Message::TerminalTabClosed(entity)),
+                )
+                .push(mono(" "));
+        }
 
         let mut header = widget::Row::new();
         if !self.sidebar_visible && !self.chat_visible {
@@ -1219,76 +1673,383 @@ impl App {
         }
         let header = header
             .push(toggle)
+            .push(mono(" "))
             .push(
-                widget::tab_bar::horizontal(&self.terminal_tabs)
-                    .on_activate(Message::TerminalTabActivated)
-                    .on_close(Message::TerminalTabClosed)
-                    .width(Length::Fill),
+                // A roda do mouse (vertical) rola as abas na horizontal; Shift+roda o scrollable
+                // já trata sozinho.
+                widget::mouse_area(
+                    widget::scrollable(tabs)
+                        .id(self.terminal_tabs_id.clone())
+                        .direction(scrollable::Direction::Horizontal(
+                            scrollable::Scrollbar::new().width(2).scroller_width(2),
+                        ))
+                        .width(Length::Fill),
+                )
+                .on_scroll(|delta| {
+                    Message::TerminalTabsWheel(match delta {
+                        cosmic::iced::mouse::ScrollDelta::Lines { y, .. } => -y * 60.0,
+                        cosmic::iced::mouse::ScrollDelta::Pixels { y, .. } => -y,
+                    })
+                }),
             )
-            .push(icon_button(
-                "list-add-symbolic",
-                "Nova aba do terminal",
-                Some(Message::NewTerminalTab),
-            ))
-            .spacing(space.space_xxs)
+            .push(ascii_button("[+]", "Nova aba do terminal", Some(Message::NewTerminalTab)))
+            .push(window_controls())
+            .spacing(space.space_xxxs)
             .align_y(Alignment::Center);
 
-        let active = self.terminal_tabs.active();
-        let body: Element<'_, Message> =
-            match self.terminal_tabs.data::<Mutex<Terminal>>(active) {
-                Some(terminal) => {
-                    let current = theme::active();
-                    let cosmic = current.cosmic();
-                    term::terminal_box(terminal, &term::KEY_BINDS)
-                        .padding(space.space_xxs)
-                        .pane_border_radius(Some(cosmic.corner_radii.radius_s.into()))
-                        .on_open_hyperlink(Some(Box::new(Message::OpenLink)))
-                        .into()
-                }
-                None => widget::container(
-                    widget::Column::new()
-                        .push(widget::text::body("Nenhum terminal aberto."))
-                        .push(
-                            widget::button::standard("Abrir terminal")
-                                .on_press(Message::NewTerminalTab),
-                        )
-                        .spacing(space.space_s)
-                        .align_x(Alignment::Center),
-                )
-                .center(Length::Fill)
-                .into(),
-            };
+        let body: Element<'_, Message> = match self.terminal_tabs.data::<Mutex<Terminal>>(active) {
+            Some(terminal) => terminal_view(terminal, self.tab_terminal_id.clone()),
+            None => widget::container(
+                widget::Column::new()
+                    .push(tinted("nenhum terminal aberto.", colors.dim))
+                    .push(ascii_button("[+] abrir terminal", "Abrir um shell", Some(Message::NewTerminalTab)))
+                    .spacing(space.space_xxs)
+                    .align_x(Alignment::Center),
+            )
+            .center(Length::Fill)
+            .into(),
+        };
 
         card(
             widget::Column::new()
-                .push(header)
+                .push(section_header(header))
                 .push(body)
-                .spacing(space.space_s),
+                .spacing(space.space_xxs),
         )
         .into()
     }
 }
 
-fn card<'a>(content: impl Into<Element<'a, Message>>) -> widget::Container<'a, Message, cosmic::Theme> {
-    widget::container(content)
-        .padding(theme::spacing().space_s)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .class(theme::Container::Card)
+/// Cores do texto "de terminal": as da paleta do tema do Chube ou, no do sistema, as do COSMIC.
+#[derive(Clone, Copy)]
+struct Colors {
+    text: Color,
+    dim: Color,
+    accent: Color,
+    success: Color,
+    warning: Color,
+    danger: Color,
+    /// Fundo dos botões ao passar o mouse e selecionados (com alfa do botão).
+    highlight: Color,
 }
 
-/// Botão de ícone com dica; sem mensagem, fica desativado.
-fn icon_button<'a>(
-    icon: &'static str,
+impl Colors {
+    fn get() -> Self {
+        if let Some(palette) = Theme::current().palette() {
+            return Colors {
+                text: palette.text,
+                dim: palette.dim,
+                accent: palette.accent,
+                success: palette.success,
+                warning: palette.warning,
+                danger: palette.danger,
+                highlight: palette.highlight,
+            };
+        }
+        let theme = theme::active();
+        let cosmic = theme.cosmic();
+        let text = Color::from(cosmic.on_bg_color());
+        Colors {
+            text,
+            dim: Color { a: 0.5, ..text },
+            accent: cosmic.accent_text_color().into(),
+            success: cosmic.success_color().into(),
+            warning: cosmic.warning_color().into(),
+            danger: cosmic.destructive_color().into(),
+            highlight: text,
+        }
+    }
+}
+
+/// Fundo da janela. No tema do sistema, o mesmo do terminal, que assim não destoa; nos
+/// próprios, o da paleta (no neon, um gradiente na diagonal).
+fn window_background(theme: &cosmic::Theme) -> Background {
+    let Some(palette) = Theme::current().palette() else {
+        return Color::from(theme.cosmic().background(theme.transparent).base).into();
+    };
+    match palette.window_end {
+        Some(end) => cosmic::iced::gradient::Linear::new(Radians(2.4))
+            .add_stop(0.0, palette.window)
+            .add_stop(1.0, end)
+            .into(),
+        None => palette.window.into(),
+    }
+}
+
+/// Cor das bordas e linhas: a da paleta ou um cinza mais claro que o fundo.
+fn border_color(theme: &cosmic::Theme) -> Color {
+    match Theme::current().palette() {
+        Some(palette) => palette.border,
+        None => Color { a: 0.22, ..Color::from(theme.cosmic().on_bg_color()) },
+    }
+}
+
+/// Seção: cantos retos e borda fina. Sem fundo próprio: o da janela (translúcido quando o
+/// tema tem blur) aparece por baixo, como nos espaços entre as seções. Pintar de novo
+/// dobraria o alfa e a seção ficaria opaca. Exceção: o tema neon, que tinge as seções de leve
+/// e acende um brilho em volta delas.
+fn card<'a>(content: impl Into<Element<'a, Message>>) -> widget::Container<'a, Message, cosmic::Theme> {
+    widget::container(content)
+        .padding(theme::spacing().space_xxs)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .class(theme::Container::custom(|theme| {
+            let palette = Theme::current().palette();
+            widget::container::Style {
+                background: palette.and_then(|palette| palette.card).map(Background::from),
+                border: Border {
+                    color: border_color(theme),
+                    width: 1.0,
+                    radius: 0.0.into(),
+                },
+                shadow: palette.and_then(|palette| palette.glow).map_or_else(Shadow::default, |color| Shadow {
+                    color,
+                    blur_radius: 16.0,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }
+        }))
+}
+
+/// Menu suspenso (modo, tema): como uma seção, mas com fundo opaco, porque abre por cima
+/// do conteúdo.
+fn menu_card<'a>(content: impl Into<Element<'a, Message>>) -> widget::Container<'a, Message, cosmic::Theme> {
+    card(content).height(Length::Shrink).class(theme::Container::custom(|theme| {
+        let background = match Theme::current().palette() {
+            Some(palette) => Color { a: 1.0, ..palette.window },
+            None => theme.cosmic().background(false).base.into(),
+        };
+        widget::container::Style {
+            background: Some(background.into()),
+            border: Border {
+                color: border_color(theme),
+                width: 1.0,
+                radius: 0.0.into(),
+            },
+            ..Default::default()
+        }
+    }))
+}
+
+/// Cabeçalho de seção com uma linha embaixo. Arrasta a janela (que não tem barra de título)
+/// e maximiza com clique duplo; os botões dentro dele continuam funcionando.
+fn section_header<'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
+    let line = widget::container(widget::Space::new().width(Length::Fill).height(Length::Fixed(1.0)))
+        .class(theme::Container::custom(|theme| widget::container::Style {
+            background: Some(border_color(theme).into()),
+            ..Default::default()
+        }));
+    widget::Column::new()
+        .push(
+            widget::mouse_area(
+                // Mesma altura em todas as seções, para as linhas de baixo ficarem alinhadas.
+                widget::container(content)
+                    .width(Length::Fill)
+                    .height(Length::Fixed(HEADER_HEIGHT)),
+            )
+                .on_drag(Message::DragWindow)
+                .on_double_click(Message::ToggleMaximize),
+        )
+        .push(line)
+        .spacing(theme::spacing().space_xxs)
+        .into()
+}
+
+fn mono<'a>(text: impl Into<Cow<'a, str>> + 'a) -> widget::Text<'a, cosmic::Theme, cosmic::Renderer> {
+    widget::text(text).font(cosmic::font::mono()).size(TEXT_SIZE)
+}
+
+fn bold<'a>(text: impl Into<Cow<'a, str>> + 'a) -> widget::Text<'a, cosmic::Theme, cosmic::Renderer> {
+    mono(text).font(Font {
+        weight: Weight::Bold,
+        ..cosmic::font::mono()
+    })
+}
+
+fn tinted<'a>(text: impl Into<Cow<'a, str>> + 'a, color: Color) -> widget::Text<'a, cosmic::Theme, cosmic::Renderer> {
+    mono(text).class(theme::Text::Color(color))
+}
+
+/// Título de seção, como um cabeçalho de markdown: `# chats`.
+fn heading<'a>(text: &'a str) -> Element<'a, Message> {
+    widget::Row::new()
+        .push(tinted("# ", Colors::get().accent))
+        .push(bold(text))
+        .into()
+}
+
+/// Botão sem fundo nem cantos; o fundo aparece ao passar o mouse e quando selecionado.
+fn flat_button<'a>(content: impl Into<Element<'a, Message>>, selected: bool) -> widget::Button<'a, Message> {
+    let style = |_theme: &cosmic::Theme, alpha: f32, disabled: bool| {
+        let colors = Colors::get();
+        let text = if disabled { Color { a: 0.35, ..colors.text } } else { colors.text };
+        widget::button::Style {
+            background: (alpha > 0.0).then(|| Color { a: alpha, ..colors.highlight }.into()),
+            border_radius: 0.0.into(),
+            text_color: Some(text),
+            icon_color: Some(text),
+            ..widget::button::Style::new()
+        }
+    };
+    let base = if selected { 0.10 } else { 0.0 };
+    widget::button::custom(content)
+        .padding([0, 2])
+        .class(theme::Button::Custom {
+            active: Box::new(move |_, theme| style(theme, base, false)),
+            hovered: Box::new(move |_, theme| style(theme, base + 0.08, false)),
+            pressed: Box::new(move |_, theme| style(theme, base + 0.16, false)),
+            disabled: Box::new(move |theme| style(theme, 0.0, true)),
+        })
+}
+
+/// Botão de texto como `[+]`, com dica; sem mensagem, fica apagado.
+fn ascii_button<'a>(
     label: &'static str,
+    tip: &'static str,
     on_press: Option<Message>,
 ) -> Element<'a, Message> {
     tooltip::tooltip(
-        widget::button::icon(widget::icon::from_name(icon)).on_press_maybe(on_press),
-        widget::text::body(label),
+        flat_button(mono(label), false).on_press_maybe(on_press),
+        widget::text::body(tip),
         tooltip::Position::Bottom,
     )
     .into()
+}
+
+/// `[?]` com a lista de atalhos de teclado na dica.
+fn shortcuts_help<'a>() -> Element<'a, Message> {
+    let mut list = widget::Column::new();
+    for (keys, shortcut) in shortcuts::LIST {
+        list = list.push(widget::text::body(format!("{keys:<14}{}", shortcut.label())).font(cosmic::font::mono()));
+    }
+    tooltip::tooltip(
+        widget::container(tinted("[?]", Colors::get().dim)).padding([0, 2]),
+        list,
+        tooltip::Position::Bottom,
+    )
+    .into()
+}
+
+/// Minimizar, maximizar e fechar, que ficavam na barra de título.
+fn window_controls<'a>() -> Element<'a, Message> {
+    widget::Row::new()
+        .spacing(theme::spacing().space_xxxs)
+        .align_y(Alignment::Center)
+        .push(tinted("│", Colors::get().dim))
+        .push(ascii_button("–", "Minimizar", Some(Message::Minimize)))
+        .push(ascii_button("□", "Maximizar", Some(Message::ToggleMaximize)))
+        .push(ascii_button("×", "Fechar o Chube", Some(Message::CloseWindow)))
+        .into()
+}
+
+fn show_sidebar_button<'a>() -> Element<'a, Message> {
+    ascii_button("[»]", "Mostrar o painel (Ctrl+Shift+1)", Some(Message::ShowSection(Section::Sidebar)))
+}
+
+/// Última pasta do caminho (`~/projects/chube` → `chube`); a home vira `~`.
+fn dir_name(path: &std::path::Path) -> String {
+    if path == claude::home_dir() {
+        return "~".into();
+    }
+    path.file_name()
+        .map_or_else(|| path.display().to_string(), |name| name.to_string_lossy().into_owned())
+}
+
+/// Símbolo e cor de cada status, no estilo da TUI do Claude Code.
+fn status_glyph(status: Status, colors: &Colors) -> (&'static str, Color) {
+    match status {
+        Status::Suspended => ("-", colors.dim),
+        Status::Starting => ("○", colors.dim),
+        Status::Working => ("✻", colors.accent),
+        Status::Waiting => ("?", colors.warning),
+        Status::Ready => ("●", colors.success),
+        Status::Exited => ("×", colors.dim),
+    }
+}
+
+/// Símbolo do modo, como no rodapé da TUI.
+fn mode_glyph(mode: Mode) -> &'static str {
+    match mode {
+        Mode::Manual | Mode::Plan => "⏸",
+        Mode::AcceptEdits | Mode::Auto | Mode::Bypass => "⏵⏵",
+    }
+}
+
+/// O terminal de um chat ou de uma aba, sem cantos arredondados.
+/// Opacidade 0 no fundo padrão: fica o da janela (com blur, se o tema tiver); células com
+/// cor de fundo própria continuam pintadas.
+fn terminal_view(terminal: &Mutex<Terminal>, id: widget::Id) -> Element<'_, Message> {
+    term::terminal_box(terminal, &term::KEY_BINDS)
+        .id(id)
+        .padding(theme::spacing().space_xxxs)
+        .pane_border_radius(Some(0.0.into()))
+        .opacity(0.0)
+        .on_open_hyperlink(Some(Box::new(Message::OpenLink)))
+        .into()
+}
+
+/// Rótulo, detalhe e uma barra ASCII colorida, como os medidores do htop:
+///
+/// ```text
+/// contexto                 84,2k / 200k
+/// [||||||||||||||||                 42%]
+/// └ reinicia em 3 h 1 min
+/// ```
+fn meter<'a>(
+    label: impl Into<Cow<'a, str>> + 'a,
+    value: Option<f32>,
+    detail: Option<String>,
+    note: Option<String>,
+) -> Element<'a, Message> {
+    let colors = Colors::get();
+    let mut head = widget::Row::new().push(mono(label).width(Length::Fill));
+    if let Some(detail) = detail {
+        head = head.push(tinted(detail, colors.dim));
+    }
+    // A quantidade de caracteres da barra depende da largura disponível.
+    let bar = widget::responsive(move |size| ascii_bar(value, size.width)).height(Length::Shrink);
+    let mut column = widget::Column::new().push(head).push(bar);
+    if let Some(note) = note {
+        column = column.push(tinted(format!("└ {note}"), colors.dim));
+    }
+    column.into()
+}
+
+fn ascii_bar<'a>(value: Option<f32>, width: f32) -> Element<'a, Message> {
+    let colors = Colors::get();
+    let value = value.map(|value| value.clamp(0.0, 1.0));
+    let percent = match value {
+        Some(value) => format!("{:.0}%", value * 100.0),
+        None => "—".to_owned(),
+    };
+    // Colchetes e um caractere de folga, porque a largura da fonte é estimada.
+    let columns = (width / (TEXT_SIZE * MONO_ADVANCE)) as usize;
+    let cells = columns.saturating_sub(3).max(8);
+    let ratio = value.unwrap_or(0.0);
+    let mut filled = ((ratio * cells as f32).round() as usize).min(cells);
+    if ratio > 0.0 {
+        filled = filled.max(1);
+    }
+    // A porcentagem fica dentro da barra, no fim; perto de 100%, cobre o fim das barras.
+    let label_len = percent.chars().count();
+    let bars = filled.min(cells - label_len);
+    let blank = cells - bars - label_len;
+    let color = if ratio >= 0.9 {
+        colors.danger
+    } else if ratio >= 0.7 {
+        colors.warning
+    } else {
+        colors.success
+    };
+    let percent = if value.is_some() { mono(percent) } else { tinted(percent, colors.dim) };
+    widget::Row::new()
+        .push(tinted("[", colors.dim))
+        .push(tinted("|".repeat(bars), color).wrapping(Wrapping::None))
+        .push(mono(" ".repeat(blank)).wrapping(Wrapping::None))
+        .push(percent.wrapping(Wrapping::None))
+        .push(tinted("]", colors.dim))
+        .into()
 }
 
 /// Teclas do campo de mensagem. Enter envia; Esc e Shift+Tab vão direto para a TUI
@@ -1317,38 +2078,52 @@ fn composer_key(
     }
 }
 
+/// Espera o `claude` do chat fechado sair (ao receber o SIGHUP, ele grava a sessão) e abre
+/// a sessão no COSMIC Terminal, na pasta do chat.
+async fn open_in_terminal(
+    pid: Option<u32>,
+    cwd: PathBuf,
+    (program, args): (String, Vec<String>),
+) -> Result<(), String> {
+    if let Some(pid) = pid {
+        let step = Duration::from_millis(50);
+        let mut waited = Duration::ZERO;
+        while waited < EXIT_WAIT && process_running(pid) {
+            tokio::time::sleep(step).await;
+            waited += step;
+        }
+    }
+    let mut child = tokio::process::Command::new("cosmic-term")
+        .arg("--working-directory")
+        .arg(&cwd)
+        .arg("-e")
+        .arg(program)
+        .args(args)
+        .spawn()
+        .map_err(|error| error.to_string())?;
+    // O cosmic-term se separa e sai logo; o `wait` evita deixar um processo zumbi.
+    tokio::spawn(async move {
+        let _ = child.wait().await;
+    });
+    Ok(())
+}
+
+/// O processo existe e não é um zumbi esperando ser recolhido.
+fn process_running(pid: u32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+        // O estado vem depois do nome, que fica entre parênteses e pode ter espaços.
+        stat.rsplit_once(')')
+            .and_then(|(_, rest)| rest.split_whitespace().next())
+            .is_some_and(|state| state != "Z")
+    })
+}
+
 /// Relê o modo na tela um pouco depois do Shift+Tab.
 fn mode_step_later(id: term::TabId) -> Task<Message> {
     cosmic::task::future(async move {
         tokio::time::sleep(MODE_STEP_DELAY).await;
         Message::ModeStep(id)
     })
-}
-
-/// Badge colorido para os status que pedem atenção na lista.
-fn status_badge<'a>(status: Status) -> Option<Element<'a, Message>> {
-    let color: fn(&cosmic::cosmic_theme::Theme) -> cosmic::cosmic_theme::palette::Srgba = match status {
-        Status::Working => |theme| theme.accent_color(),
-        Status::Waiting => |theme| theme.warning_color(),
-        _ => return None,
-    };
-    Some(
-        widget::container(widget::text::caption(status.label()))
-            .padding([0, theme::spacing().space_xs])
-            .class(theme::Container::custom(move |theme| {
-                let color = cosmic::iced::Color::from(color(theme.cosmic()));
-                widget::container::Style {
-                    text_color: Some(color),
-                    background: Some(cosmic::iced::Color { a: 0.18, ..color }.into()),
-                    border: cosmic::iced::Border {
-                        radius: 8.0.into(),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                }
-            }))
-            .into(),
-    )
 }
 
 /// Recebe os eventos de todos os terminais (vêm das threads do PTY).
@@ -1399,37 +2174,8 @@ fn terminal_io(terminal: &Mutex<Terminal>, event: term::Event) -> Task<Message> 
     Task::none()
 }
 
-fn show_sidebar_button<'a>() -> Element<'a, Message> {
-    icon_button(
-        "pan-end-symbolic",
-        "Mostrar o painel",
-        Some(Message::ShowSection(Section::Sidebar)),
-    )
-}
-
 fn horizontal_fill() -> widget::Space {
     widget::Space::new().width(Length::Fill)
-}
-
-fn meter<'a>(
-    label: impl Into<std::borrow::Cow<'a, str>> + 'a,
-    value: f32,
-    detail: String,
-    note: Option<String>,
-) -> Element<'a, Message> {
-    let mut column = widget::Column::new()
-        .push(
-            widget::Row::new()
-                .push(widget::text::body(label).width(Length::Fill))
-                .push(widget::text::caption(detail))
-                .spacing(theme::spacing().space_xs),
-        )
-        .push(cosmic::iced::widget::progress_bar(0.0..=1.0, value.clamp(0.0, 1.0)).girth(6.0))
-        .spacing(theme::spacing().space_xxs);
-    if let Some(note) = note {
-        column = column.push(widget::text::caption(note));
-    }
-    column.into()
 }
 
 fn now_hms() -> String {
@@ -1437,14 +2183,52 @@ fn now_hms() -> String {
 }
 
 fn short_title(text: &str) -> String {
-    let line = text.lines().next().unwrap_or_default();
-    if line.chars().count() > TITLE_MAX_CHARS {
-        format!("{}…", line.chars().take(TITLE_MAX_CHARS).collect::<String>())
+    short_text(text.lines().next().unwrap_or_default(), TITLE_MAX_CHARS)
+}
+
+fn short_text(text: &str, max: usize) -> String {
+    if text.chars().count() > max {
+        format!("{}…", text.chars().take(max).collect::<String>())
     } else {
-        line.to_owned()
+        text.to_owned()
     }
 }
 
-fn thousands(tokens: u32) -> String {
-    format!("{:.1} mil", tokens as f32 / 1000.0).replace('.', ",")
+/// `84,2k`, `200k`, `1m`.
+fn short_tokens(tokens: u32) -> String {
+    let (value, unit) = match tokens {
+        1_000_000.. => (tokens as f32 / 1_000_000.0, "m"),
+        1_000.. => (tokens as f32 / 1_000.0, "k"),
+        _ => return tokens.to_string(),
+    };
+    let text = format!("{value:.1}");
+    let text = text.strip_suffix(".0").unwrap_or(&text);
+    format!("{}{unit}", text.replace('.', ","))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn process_running_ve_processos_vivos_e_zumbis() {
+        assert!(process_running(std::process::id()));
+        assert!(!process_running(u32::MAX));
+
+        // Um filho que saiu e ainda não foi recolhido é zumbi: conta como encerrado.
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let pid = child.id();
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(!process_running(pid));
+        child.wait().unwrap();
+        assert!(!process_running(pid));
+    }
+
+    #[test]
+    fn short_tokens_abrevia() {
+        assert_eq!(short_tokens(950), "950");
+        assert_eq!(short_tokens(84_230), "84,2k");
+        assert_eq!(short_tokens(200_000), "200k");
+        assert_eq!(short_tokens(1_000_000), "1m");
+    }
 }

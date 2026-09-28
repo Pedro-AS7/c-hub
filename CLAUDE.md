@@ -20,7 +20,11 @@ Projeto em português (Brasil). Comentários e UI em PT-BR; identificadores de c
 
 - `cargo run` — roda em modo debug (a primeira compilação baixa e compila o libcosmic: alguns minutos).
 - `cargo build --release` — binário otimizado em `target/release/chube`.
-- `cargo test` — testes do leitor do `/usage` (`src/usage.rs`), do comando, do título e do modo em `src/claude.rs`,
+- `./install.sh` — compila em release e instala para o usuário: binário em `~/.local/bin/chube`, ícone
+  (`res/com.pedro.Chube.svg` → `~/.local/share/icons/hicolor/scalable/apps/`) e `.desktop` (`res/com.pedro.Chube.desktop`
+  → `~/.local/share/applications/com.pedro.Chube.desktop`, com o caminho absoluto do binário). Rodar de novo atualiza;
+  `./install.sh --uninstall` remove. O nome do `.desktop` é o `APP_ID` da janela, que é como o dock liga os dois.
+- `cargo test` — testes do leitor do `/usage` e do `/context` (`src/usage.rs`), de `process_running` e `short_tokens` (`src/app.rs`), dos atalhos (`src/shortcuts.rs`), da lista de chats gravada (`src/restore.rs`), dos temas (`src/themes.rs`), do comando, do título e do modo em `src/claude.rs`,
   das sugestões de `/comandos` (`src/commands.rs`) e os que vieram do cosmic-term em `src/term/terminal_box.rs`.
 - Opções: `chube [--model <modelo>] [--prompt <mensagem>]`. `--model` vale para os chats novos; `--prompt` é passado ao `claude`
   do primeiro chat, que já começa respondendo (útil para testar sem clicar).
@@ -40,10 +44,13 @@ src/
                 new / resume / fork / reopen
   claude.rs     Comando do `claude` interativo, caminho do binário, título vindo do terminal, Mode
   commands.rs   Comandos `/…` sugeridos no campo de mensagem (do Claude Code, do usuário e do projeto)
+  shortcuts.rs  Atalhos de teclado (tabela `KEY_BINDS`, também passada aos terminais)
   sessions.rs   Sessões salvas (~/.claude/projects), status de um `claude` pelo pid (~/.claude/sessions)
                 e contexto/modelo pelo fim do .jsonl
   dirs.rs       Resolve o diretório digitado: ".", "~", caminhos, atalhos do fshort (~/.shortcuts)
   usage.rs      Limites do plano via `/usage`
+  restore.rs    Lista de chats abertos, gravada a cada mudança e reaberta ao iniciar
+  themes.rs     Temas (sistema, fósforo, neon, gruvbox): paletas, CosmicTheme de cada um, tema gravado
   term/         Terminal portado do cosmic-term (mod.rs substitui config, menu e atalhos de lá)
 ```
 
@@ -58,7 +65,7 @@ env -u ANTHROPIC_API_KEY claude (--session-id <uuid> | --resume <id> | --resume 
 
 - A conversa, as permissões, os comandos `/…` etc. são da própria TUI do Claude Code; o app só escreve no PTY,
   como um teclado (campo de mensagem, seletor de modo).
-- Todos os chats ficam vivos ao mesmo tempo; a lista "Chats ativos" só troca qual terminal aparece na seção central.
+- Todos os chats ficam vivos ao mesmo tempo; a lista "# chats" só troca qual terminal aparece na seção central.
 - `ANTHROPIC_API_KEY` sai do ambiente pelo `env -u`: com ela, o Claude Code cobraria pela API em vez do plano.
   O `env` faz `exec`, então o pid do PTY (`Terminal::pid`) é o do `claude`.
 - `main.rs` apaga as variáveis que um Claude Code põe nos filhos (`CLAUDECODE`, `CLAUDE_CODE_CHILD_SESSION`…).
@@ -68,12 +75,28 @@ env -u ANTHROPIC_API_KEY claude (--session-id <uuid> | --resume <id> | --resume 
 - Fechar o app fecha os PTYs, e o `claude` recebe SIGHUP.
 - Quando o `claude` sai (`/exit`), o chat fica "encerrado" com a última saída na tela e o botão "Reabrir sessão"
   (`--resume` do mesmo id, no mesmo lugar da lista).
-- O × do cabeçalho e o × de cada item da lista "Chats ativos" fecham o chat (descarta o `Terminal`: SIGHUP no `claude`). Sem nenhum chat, a seção central mostra
+- O `[exit]` do cabeçalho e o `[x]` de cada item da lista "# chats" fecham o chat (descarta o `Terminal`: SIGHUP no `claude`). Sem nenhum chat, a seção central mostra
   "Nova sessão" / "Sessões salvas"; o código usa `self.chats.get(self.focused)`, nunca indexação direta.
+- `[term]` leva a sessão do chat em foco para o COSMIC Terminal: confere se já existe o `.jsonl`
+  (`sessions::session_file`; sessão nova sem mensagem não tem, e o `--resume` falharia), fecha o chat, espera o `claude`
+  sair (`/proc/<pid>/stat`, zumbi conta como encerrado, até `EXIT_WAIT`) e roda
+  `cosmic-term --working-directory <pasta> -e env -u ANTHROPIC_API_KEY claude --resume <id> [--model <m>]`.
+  O `cosmic-term` se separa e sai logo. Falhas aparecem como aviso (`App::notice`) abaixo do cabeçalho do chat.
 
-### Campo de mensagem (abaixo do terminal do chat)
-- `text_editor` do libcosmic que cresce com o texto (até `COMPOSER_MAX_HEIGHT`, depois rola). É ele que recebe o foco
-  ao trocar de chat; clicar no terminal do chat continua permitindo digitar direto na TUI.
+### Chats restaurados ao abrir (`src/restore.rs`)
+- O app abre sem chat novo: volta a lista da última execução, gravada em `$XDG_STATE_HOME/chube/chats.json`
+  (padrão `~/.local/state/chube/chats.json`): id da sessão, pasta, título, `--model`, sub-chat de quem e o chat em foco.
+- Gravada a cada mudança, não só ao fechar (logout ou `kill` não passam pelo fechamento): `Application::update`
+  chama `App::handle` e depois `save_open_chats`, que compara com a última gravação e só escreve se mudou
+  (arquivo temporário + `rename`). Sub-chat sem id conhecido ainda fica de fora.
+- Os chats voltam em espera (`Status::Suspended`, `-` "em espera"): só o do foco abre com `--resume`, os outros
+  quando forem selecionados (`App::wake_focused`, também chamado depois de cada mensagem). Evita subir N `claude` de uma vez.
+- Sessão sem `.jsonl` (nenhuma mensagem, ou apagada pelo Claude Code) volta como chat novo na mesma pasta: o `--resume` falharia.
+- Testar sem mexer na lista real: `XDG_STATE_HOME=<pasta> cargo run`.
+
+### Campo de mensagem (fora da tela desde o commit 29b1144; o código ficou)
+- `text_editor` do libcosmic que cresce com o texto (até `COMPOSER_MAX_HEIGHT`, depois rola). Ao trocar de chat,
+  o foco vai para o terminal do chat (`App::focus_chat`, pelo `chat_terminal_id`).
 - Enter envia: o texto vai por bracketed paste (`Terminal::paste`) e o `\r` segue `SUBMIT_DELAY` depois — junto da
   colagem, a TUI trataria o Enter como texto. Assim `/model`, `/btw` etc. rodam como comandos (testado na 2.1.283).
 - Teclas repassadas à TUI: Esc (interromper), Shift+Tab (modo), e, com o campo vazio, Enter e ↑/↓ (escolher opção
@@ -87,12 +110,30 @@ env -u ANTHROPIC_API_KEY claude (--session-id <uuid> | --resume <id> | --resume 
 - Trocar no seletor manda um Shift+Tab (`\x1b[Z`) por vez e relê a tela (`MODE_STEP_DELAY`) até chegar ao pedido;
   desiste ao voltar ao modo inicial (o pedido não está no ciclo, ex.: "Sem permissões") ou após `MODE_MAX_STEPS`.
 
+### Atalhos de teclado (`src/shortcuts.rs`)
+
+| Tecla | Ação |
+|---|---|
+| Ctrl+Shift+N | Nova sessão (abre o diálogo) |
+| Ctrl+Shift+1 / 2 / 3 | Mostrar/esconder painel, chat, terminal (chat e terminal não somem os dois) |
+| Ctrl+Tab | Foco do teclado: terminal do chat ↔ terminal integrado (mostra a seção se estiver escondida; sem aba, abre uma) |
+| Ctrl+Shift+↑ / ↓ | Chat de cima / de baixo na lista "# chats" (dá a volta nas pontas) |
+
+- A mesma tabela (`KEY_BINDS`) vai para os `terminal_box` como `key_binds`: com o foco num terminal, essas teclas não
+  chegam ao PTY. O app as recebe por `event::listen_with`, sem olhar se o evento foi capturado (os terminais capturam).
+- Os números valem pela tecla física (`KeyBind::matches` com `physical_key`), independentemente do layout.
+- Foco: os dois terminais na tela têm ids fixos (`chat_terminal_id`, `tab_terminal_id`); `operation::focus(id)` foca um e
+  tira o foco dos outros; o Ctrl+Tab pergunta `operation::is_focused(chat_terminal_id)` para decidir o destino.
+- A lista aparece na dica do `[?]` no cabeçalho "# chats"; as dicas dos botões mostram a tecla.
+
 ### Status, título e contexto
 - A cada 1 s (`Message::Poll`, em `spawn_blocking`), para cada chat vivo: `~/.claude/sessions/<pid>.json` →
   `sessionId` e `status` (`busy` → trabalhando, `waiting` → precisa de você, `idle` → pronto). O `sessionId` muda
   com `/clear` e é assim que um sub-chat descobre o id novo.
 - Só do chat em foco: os últimos 512 KB do `.jsonl` da sessão → tokens de contexto e modelo da última resposta.
-  O tamanho da janela não é gravado: acima de 200 mil tokens, o painel assume 1 milhão.
+  O tamanho da janela não é gravado: vem de `claude -p --model <modelo> "/context"` (local, 0 tokens,
+  `**Tokens:** 11.3k / 1m`), uma vez por modelo (`usage::context_window`, cache em `App::context_windows`).
+  Até responder, 200 mil; acima de 200 mil tokens, no mínimo 1 milhão.
 - Título: o Claude Code define o título do terminal como `✳ Assunto` (spinner no lugar do `✳` enquanto trabalha);
   `claude::title_from_terminal` tira o símbolo e ignora `Claude Code`.
 
@@ -120,7 +161,7 @@ mudanças, marcadas no topo de cada arquivo:
 - `terminal_theme.rs` só com as paletas COSMIC Dark/Light.
 
 `term/mod.rs` substitui o que esses arquivos usavam do cosmic-term (`Config` com os valores padrão de lá, `MenuState`,
-`Action` sem variantes) e tem `spawn()`. Os eventos do PTY chegam por um canal único (`Message::TermEventTx` /
+`Action`, que aqui é o `shortcuts::Shortcut`) e tem `spawn()`. Os eventos do PTY chegam por um canal único (`Message::TermEventTx` /
 `TermEvent`), tratados em `App::handle_term_event` como no `Message::TermEvent` do cosmic-term.
 Para trazer novidades do upstream, compare com o cosmic-term e reaplique só essas mudanças.
 
@@ -128,9 +169,51 @@ Para trazer novidades do upstream, compare com o cosmic-term e reaplique só ess
 
 - Comentários em PT-BR, curtos, explicando o porquê.
 - Widgets com `widget::Column::new()` / `widget::Row::new()` (os helpers `widget::column()`/`row()` do iced exigem argumento),
-  espaçamentos de `theme::spacing()`, seções dentro de `card()` (`theme::Container::Card`).
+  espaçamentos de `theme::spacing()`, seções dentro de `card()`.
+
+## Visual (estilo "terminal")
+
+- Sem a barra de título do libcosmic (`core.window.show_headerbar = false`, `content_container = false`): o conteúdo
+  ocupa a janela toda. O cabeçalho de cada seção (`section_header`) arrasta a janela e maximiza com clique duplo;
+  minimizar/maximizar/fechar (`window_controls`) ficam no fim do cabeçalho da seção mais à direita (terminal, ou chat).
+- Seções (`card()`): cantos retos, borda de 1 px em cinza claro (`border_color`), espaço de `space_xxs` entre elas e
+  dentro delas. O fundo (`background_color`) é pintado **uma vez só**, no container da janela: os cards não têm fundo e os
+  terminais usam `.opacity(0.0)` no fundo padrão. Assim, com o tema "frosted" (blur) do COSMIC, as seções ficam translúcidas
+  como os espaços entre elas; pintar de novo dobraria o alfa e deixaria as seções opacas.
+- Todo texto em fonte mono (`mono`, `bold`, `tinted`, tamanho `TEXT_SIZE`); cores do tema em `Colors`.
+  Os cabeçalhos das seções têm a mesma altura (`HEADER_HEIGHT`, duas linhas, como o do chat), para as linhas de baixo
+  ficarem alinhadas; é altura fixa no container (um `Space` de altura mínima dentro de uma `Row` não funcionou).
+  Títulos como `# chats`; botões de texto sem fundo (`ascii_button`/`flat_button`): `[+]`, `[fork]`, `[term]`, `[exit]`, `[«]`.
+- Status com símbolos da TUI (`status_glyph`): `✻` trabalhando, `?` precisa de você, `●` pronto, `○` iniciando, `×` encerrado.
+- Barras de uso/contexto em ASCII no estilo do htop (`ascii_bar`: `[||||||      42%]`, verde/amarelo ≥ 70%/vermelho ≥ 90%).
+  A quantidade de `|` vem da largura disponível (`widget::responsive`) dividida pela largura estimada do caractere
+  (`TEXT_SIZE * MONO_ADVANCE`, 0,6 na Fira Mono/Noto Sans Mono). Evite `█`/`░`: a Fira Mono (mono padrão do COSMIC)
+  não tem esses caracteres e a fonte de reserva tem outra largura.
+- Seletor de modo: botão `[⏸ manual ▾]` com menu em `widget::popover` (`App::mode_menu`), no lugar do `dropdown`
+  (que não aceita estilo). Abas do terminal desenhadas à mão (`chube ×`), sobre o mesmo `segmented_button::Model`,
+  num `scrollable` horizontal (a roda do mouse vertical vira rolagem horizontal pelo `mouse_area`; aba nova rola até o fim).
+  O nome é a última pasta do shell (`TabDir`, relida em `/proc/<pid>/cwd` a cada mudança de título, que o oh-my-zsh faz
+  a cada prompt); a segunda aba na mesma pasta vira `chube 2`, a terceira `chube 3` (`App::terminal_tab_names`).
+- Continuam no estilo padrão do COSMIC: o diálogo "Nova sessão" e a gaveta de sessões salvas (só os itens dela são mono).
+- Menus suspensos (modo, tema) usam `menu_card`: como `card`, mas com fundo opaco (o `popover` não pinta fundo).
 - Funções async na UI via `cosmic::task::future(async { Message::… })`; trabalho de disco em `tokio::task::spawn_blocking`.
 - `Message` precisa ser `Clone + Debug`: o `Terminal` fica no `Chat` (dentro de `Mutex`), nunca numa mensagem.
+
+### Temas (`src/themes.rs`)
+- `[◐]` no cabeçalho "# uso" abre o menu: **sistema** (cores do COSMIC, como antes), **fósforo** (fundo `#000000` até no
+  container da janela, bordas cinza `#5A5A5A`, texto verde `#33FF66`), **neon** (gradiente azul translúcido na diagonal,
+  bordas ciano com brilho via `Shadow` do container, desfoque do COSMIC) e **gruvbox** (paleta Gruvbox dark, quente e opaca).
+- O escolhido fica em `$XDG_CONFIG_HOME/chube/theme` (padrão `~/.config/chube/theme`, uma palavra: `system`, `phosphor`,
+  `neon`, `gruvbox`) e é aplicado no `init`, antes de abrir terminais. O tema atual fica num `static` (`Theme::current`),
+  lido pelas funções de estilo (`Colors::get`, `window_background`, `border_color`, `card`, `flat_button`).
+- Cada tema próprio vira um `CosmicTheme` (`ThemeBuilder` com fundo, `text_tint`, cores e `frosted_windows`) aplicado com
+  `cosmic::command::set_theme`: diálogo, dicas e gaveta seguem o tema. O `CosmicTheme` calcula o próprio tom do texto, então a cor
+  exata da paleta vem do `Application::style` (cor padrão do texto) e dos estilos do app. Voltar a "sistema" usa
+  `cosmic::theme::system_preference()`, que segue as Configurações.
+- Terminais: `term::themes()` inclui a paleta ANSI de cada tema (`terminal_theme::from_palette`) e `Config::syntax_theme`
+  escolhe pelo tema atual; na troca, `term::apply_theme` recolore os terminais abertos (chats e abas).
+  Cores truecolor da TUI do `claude` não mudam.
+- Testar um tema sem mexer no escolhido: gravar o nome em `~/.config/chube/theme`, abrir com `XDG_STATE_HOME=<pasta>` e capturar a tela.
 
 ## Verificar a UI
 
@@ -142,7 +225,7 @@ O Claude **não consegue clicar nem digitar na janela** (o app não aparece no A
   Se o Claude estiver rodando **dentro** de um Chube, abra uma segunda instância e feche só ela pelo pid;
 - lógica fora da UI (parsers, resolução de diretório): testes em Rust;
 - cliques e digitação (troca de chat, painel de sessões, diálogo de nova sessão, sub-chat, "Reabrir sessão",
-  terminais, campo de mensagem, seletor de modo): pedir para conferir manualmente;
+  terminais, campo de mensagem, seletor de modo, `[term]`, atalhos de teclado, arrastar a janela pelos cabeçalhos, botões – □ ×): pedir para conferir manualmente;
 - bytes que a TUI entende: script Python com `pty.fork()` rodando o `claude` (comandos locais como `/help` não gastam tokens).
 
 ## Status do projeto
@@ -150,7 +233,7 @@ O Claude **não consegue clicar nem digitar na janela** (o app não aparece no A
 Versão 0.1.0. O roteiro inicial de 5 passos está completo (2026-09-27): esqueleto, chat real, sessões salvas/retomar/
 sub-chat/permissões, painel de consumo e terminal integrado. Em seguida (2026-09-27), o chat em stream-json com
 markdown e cartão de permissão foi trocado pelo `claude` interativo num terminal por chat. Repositório git criado (branch `main`), **ainda sem commits**.
-Não está instalado (sem binário em `~/.local/bin` nem `.desktop`).
+Instalado pelo `./install.sh` (2026-09-27): aparece no launcher como "Chube" e pode ser fixado no dock.
 
 Validado por captura de tela: o `claude` do chat abre com `--prompt`, responde, e status, modelo e contexto aparecem.
 Ainda não testado com clique: troca entre chats, painel de sessões, diálogo de nova sessão, sub-chat, "Reabrir sessão",

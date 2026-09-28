@@ -3,8 +3,11 @@ mod chat;
 mod claude;
 mod commands;
 mod dirs;
+mod restore;
 mod sessions;
+mod shortcuts;
 mod term;
+mod themes;
 mod usage;
 
 use cosmic::iced::{Limits, Size};

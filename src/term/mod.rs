@@ -14,12 +14,13 @@ mod terminal_theme;
 
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
-use std::sync::{LazyLock, Mutex};
+use std::sync::Mutex;
 
 use alacritty_terminal::term::color::Colors;
 use cosmic::cosmic_theme::palette::Srgba;
-use cosmic::widget::menu::key_bind::KeyBind;
 use cosmic_text::{Metrics, Stretch};
+
+use crate::themes::Theme;
 
 pub use alacritty_terminal::event::Event;
 pub use terminal::Terminal;
@@ -45,12 +46,10 @@ pub struct MenuState {
     pub link: Option<String>,
 }
 
-/// Ações de atalho do cosmic-term; o Chube não registra nenhuma
-/// (copiar e colar são tratados direto no widget).
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Action {}
-
-pub static KEY_BINDS: LazyLock<HashMap<KeyBind, Action>> = LazyLock::new(HashMap::new);
+/// No cosmic-term, as ações dos atalhos do app. Aqui são os atalhos do Chube: o terminal
+/// não manda essas teclas ao PTY, e o app as trata numa subscription (copiar e colar
+/// continuam direto no widget).
+pub use crate::shortcuts::{KEY_BINDS, Shortcut as Action};
 
 /// Substitui a `Config` do cosmic-term, com os valores padrão dela.
 pub struct Config {
@@ -83,12 +82,16 @@ impl Config {
         Stretch::Normal
     }
 
+    /// Paleta do tema do Chube em uso; no do sistema, a COSMIC Dark ou Light.
     pub fn syntax_theme(
         &self,
         kind: ColorSchemeKind,
         _profile_id: Option<ProfileId>,
     ) -> (String, ColorSchemeKind) {
-        (theme_name(kind).to_owned(), kind)
+        match Theme::current() {
+            Theme::System => (theme_name(kind).to_owned(), kind),
+            theme => (theme.label().to_owned(), ColorSchemeKind::Dark),
+        }
     }
 }
 
@@ -100,10 +103,19 @@ fn theme_name(kind: ColorSchemeKind) -> &'static str {
 }
 
 pub fn themes() -> HashMap<(String, ColorSchemeKind), Colors> {
-    HashMap::from([
+    let mut themes = HashMap::from([
         ((theme_name(ColorSchemeKind::Dark).to_owned(), ColorSchemeKind::Dark), terminal_theme::cosmic_dark()),
         ((theme_name(ColorSchemeKind::Light).to_owned(), ColorSchemeKind::Light), terminal_theme::cosmic_light()),
-    ])
+    ]);
+    for theme in Theme::ALL {
+        if let Some(palette) = theme.palette() {
+            themes.insert(
+                (theme.label().to_owned(), ColorSchemeKind::Dark),
+                terminal_theme::from_palette(&palette.terminal),
+            );
+        }
+    }
+    themes
 }
 
 pub fn color_scheme_kind(theme: &cosmic::Theme) -> ColorSchemeKind {
@@ -114,12 +126,24 @@ pub fn color_scheme_kind(theme: &cosmic::Theme) -> ColorSchemeKind {
     }
 }
 
-/// Fundo padrão do terminal (o "sem cor" das aplicações), tirado do tema do sistema.
+/// Fundo padrão do terminal (o "sem cor" das aplicações): o do tema do Chube ou, no do
+/// sistema, o do COSMIC.
 pub fn set_background(theme: &cosmic::Theme) {
-    let color: Srgba = theme.cosmic().background(theme.transparent).base;
-    let bytes = cosmic::iced::Color::from(color).into_rgba8();
-    let data = u32::from(bytes[2]) | (u32::from(bytes[1]) << 8) | (u32::from(bytes[0]) << 16) | 0xFF00_0000;
-    terminal::WINDOW_BG_COLOR.store(data, Ordering::SeqCst);
+    let rgb = match Theme::current().palette() {
+        Some(palette) => palette.terminal.background,
+        None => {
+            let color: Srgba = theme.cosmic().background(theme.transparent).base;
+            let bytes = cosmic::iced::Color::from(color).into_rgba8();
+            u32::from(bytes[2]) | (u32::from(bytes[1]) << 8) | (u32::from(bytes[0]) << 16)
+        }
+    };
+    terminal::WINDOW_BG_COLOR.store(rgb | 0xFF00_0000, Ordering::SeqCst);
+}
+
+/// Troca as cores de um terminal aberto pelas do tema em uso (`theme` é o do libcosmic).
+pub fn apply_theme(terminal: &mut Terminal, theme: &cosmic::Theme) {
+    set_background(theme);
+    terminal.set_config(&Config::default(), color_scheme_kind(theme), &themes());
 }
 
 /// Abre um terminal novo em `cwd`, rodando `command` (programa e argumentos) ou,
