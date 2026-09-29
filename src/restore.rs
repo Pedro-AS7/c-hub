@@ -99,7 +99,7 @@ mod tests {
     fn chat(id: &str, parent: Option<&str>) -> OpenChat {
         OpenChat {
             session_id: id.into(),
-            cwd: PathBuf::from("/home/pedro/projects/chube"),
+            cwd: PathBuf::from("/tmp/projeto"),
             title: format!("Chat {id}"),
             model: Some("haiku".into()),
             parent: parent.map(str::to_owned),
