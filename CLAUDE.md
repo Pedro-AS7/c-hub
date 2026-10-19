@@ -50,7 +50,7 @@ src/
   dirs.rs       Resolve o diretório digitado: ".", "~", caminhos, atalhos do fshort (~/.shortcuts)
   usage.rs      Limites do plano via `/usage`
   restore.rs    Lista de chats abertos, gravada a cada mudança e reaberta ao iniciar
-  themes.rs     Temas (sistema, fósforo, neon, gruvbox, vidro, fumê, transparente, grafite): paletas,
+  themes.rs     Temas (sistema, fósforo, neon, gruvbox, vidro, fumê, transparente, grafite, preto): paletas,
                 CosmicTheme de cada um, tema gravado, pedido de desfoque para a extensão do GNOME
   term/         Terminal portado do cosmic-term (mod.rs substitui config, menu e atalhos de lá)
 gnome/
@@ -211,8 +211,9 @@ Para trazer novidades do upstream, compare com o cosmic-term e reaplique só ess
   Mais quatro iguais aos temas de mesmo nome da dock, do painel e dos menus do GNOME (`temas.json` das extensões
   `temas-*@pedro`): **vidro** (branco translúcido em gradiente), **fumê** (cinza escuro translúcido), **transparente**
   (sem fundo, só o desfoque mais escuro) e **grafite** (cinza opaco). ANSI do GNOME Terminal.
+  E **preto**: fundo `#000000` opaco (sem desfoque), texto cinza-claro neutro, ANSI do GNOME Terminal com o preto puro.
 - O escolhido fica em `$XDG_CONFIG_HOME/chube/theme` (padrão `~/.config/chube/theme`, uma palavra: `system`, `phosphor`,
-  `neon`, `gruvbox`, `glass`, `smoke`, `transparent`, `graphite`) e é aplicado no `init`, antes de abrir terminais. O tema atual fica num `static` (`Theme::current`),
+  `neon`, `gruvbox`, `glass`, `smoke`, `transparent`, `graphite`, `black`) e é aplicado no `init`, antes de abrir terminais. O tema atual fica num `static` (`Theme::current`),
   lido pelas funções de estilo (`Colors::get`, `window_background`, `border_color`, `card`, `flat_button`).
 - Cada tema próprio vira um `CosmicTheme` (`ThemeBuilder` com fundo, `text_tint`, cores e `frosted_windows`) aplicado com
   `cosmic::command::set_theme`: diálogo, dicas e gaveta seguem o tema. O `CosmicTheme` calcula o próprio tom do texto, então a cor

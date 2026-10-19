@@ -1,4 +1,4 @@
-//! Temas do Chube: o do sistema (cores do COSMIC) e sete próprios. O escolhido fica em
+//! Temas do Chube: o do sistema (cores do COSMIC) e oito próprios. O escolhido fica em
 //! `~/.config/chube/theme` (e o desfoque do fundo, ligado ou não, em `~/.config/chube/blur`) e
 //! vale para a interface, os diálogos do libcosmic (um `CosmicTheme` montado a partir da paleta)
 //! e as cores dos terminais.
@@ -37,6 +37,8 @@ pub enum Theme {
     Transparent,
     /// Cinza opaco, como o "Grafite" da dock, do painel e dos menus.
     Graphite,
+    /// Preto puro e opaco (bom em tela OLED), texto cinza-claro neutro.
+    Black,
 }
 
 /// Tema em uso, lido pelas funções de estilo (que não recebem o `App`).
@@ -66,7 +68,7 @@ pub fn save_blur(on: bool) -> std::io::Result<()> {
 }
 
 impl Theme {
-    pub const ALL: [Theme; 8] = [
+    pub const ALL: [Theme; 9] = [
         Theme::System,
         Theme::Phosphor,
         Theme::Neon,
@@ -75,6 +77,7 @@ impl Theme {
         Theme::Smoke,
         Theme::Transparent,
         Theme::Graphite,
+        Theme::Black,
     ];
 
     pub fn label(self) -> &'static str {
@@ -87,6 +90,7 @@ impl Theme {
             Theme::Smoke => "fumê",
             Theme::Transparent => "transparente",
             Theme::Graphite => "grafite",
+            Theme::Black => "preto",
         }
     }
 
@@ -101,6 +105,7 @@ impl Theme {
             Theme::Smoke => "smoke",
             Theme::Transparent => "transparent",
             Theme::Graphite => "graphite",
+            Theme::Black => "black",
         }
     }
 
@@ -142,6 +147,7 @@ impl Theme {
             Theme::Smoke => Some(&SMOKE),
             Theme::Transparent => Some(&TRANSPARENT),
             Theme::Graphite => Some(&GRAPHITE),
+            Theme::Black => Some(&BLACK),
         }
     }
 
@@ -458,6 +464,33 @@ static GRAPHITE: Palette = Palette {
         foreground: 0xE6E6E6,
         cursor: 0xE6E6E6,
         background: 0x2B2B2B,
+    },
+};
+
+static BLACK: Palette = Palette {
+    window: rgb(0x000000),
+    window_end: None,
+    card: None,
+    border: rgb(0x3D3D3D),
+    glow: None,
+    text: rgb(0xE6E6E6),
+    dim: rgb(0x8A8A8A),
+    accent: rgb(0x78AEED),
+    success: rgb(0x57E389),
+    warning: rgb(0xF8E45C),
+    danger: rgb(0xF66151),
+    highlight: rgb(0xFFFFFF),
+    neutral: Some(rgb(0x4A4A4A)),
+    // Opaco: com o desfoque, o fundo deixaria de ser preto puro.
+    blur: None,
+    terminal: TerminalPalette {
+        ansi: [
+            0x000000, 0xF66151, 0x57E389, 0xF8E45C, 0x62A0EA, 0xC061CB, 0x5BC8AF, 0xDEDDDA, //
+            0x77767B, 0xFF7B63, 0x8FF0A4, 0xF9F06B, 0x99C1F1, 0xDC8ADD, 0x93DDC2, 0xFFFFFF,
+        ],
+        foreground: 0xE6E6E6,
+        cursor: 0xE6E6E6,
+        background: 0x000000,
     },
 };
 
