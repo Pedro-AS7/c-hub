@@ -32,6 +32,9 @@ fn main() -> cosmic::iced::Result {
         // SAFETY: nenhuma outra thread existe ainda.
         unsafe { std::env::remove_var(var) };
     }
+    // TERM e COLORTERM=truecolor para os terminais, como no cosmic-term. Aberto pelo launcher,
+    // o Chube não herda TERM, e sem ele o `claude` não manda cor nenhuma.
+    alacritty_terminal::tty::setup_env();
 
     let settings = cosmic::app::Settings::default()
         .size(Size::new(1400.0, 860.0))

@@ -25,7 +25,7 @@ Projeto em português (Brasil). Comentários e UI em PT-BR; identificadores de c
   → `~/.local/share/applications/com.pedro.Chube.desktop`, com o caminho absoluto do binário). Rodar de novo atualiza;
   `./install.sh --uninstall` remove. O nome do `.desktop` é o `APP_ID` da janela, que é como o dock liga os dois.
 - `cargo test` — testes do leitor do `/usage` e do `/context` (`src/usage.rs`), de `process_running` e `short_tokens` (`src/app.rs`), dos atalhos (`src/shortcuts.rs`), da lista de chats gravada (`src/restore.rs`), dos temas (`src/themes.rs`), do comando, do título e do modo em `src/claude.rs`,
-  das sugestões de `/comandos` (`src/commands.rs`) e os que vieram do cosmic-term em `src/term/terminal_box.rs`.
+  das sugestões de `/comandos` (`src/commands.rs`), do fundo das mensagens do `claude` (`src/term/terminal.rs`) e os que vieram do cosmic-term em `src/term/terminal_box.rs`.
 - Opções: `chube [--model <modelo>] [--prompt <mensagem>]`. `--model` vale para os chats novos; `--prompt` é passado ao `claude`
   do primeiro chat, que já começa respondendo (útil para testar sem clicar).
 
@@ -36,7 +36,8 @@ Projeto em português (Brasil). Comentários e UI em PT-BR; identificadores de c
 ```
 src/
   main.rs       Argumentos (--model, --prompt) e Settings da janela
-                (também limpa as variáveis de sessão herdadas de um Claude Code pai)
+                (também limpa as variáveis de sessão herdadas de um Claude Code pai e define
+                TERM/COLORTERM para os terminais: aberto pelo launcher, sem TERM o `claude` não tem cor)
   app.rs        App (cosmic::Application): layout em pane_grid (painel | chat | terminal), update/view,
                 diálogo de nova sessão, painel lateral de sessões salvas, painel "Uso", leitura periódica
                 do status dos chats (Message::Poll)
@@ -161,7 +162,10 @@ mudanças, marcadas no topo de cada arquivo:
 - foco: o clique dá foco também no modo de mouse (a TUI do `claude` liga esse modo), clicar fora tira o foco
   (antes, o terminal do chat e o do painel ficavam os dois com foco e recebiam o mesmo texto) e o foco volta
   quando a janela recupera o dela (antes era preciso trocar de chat);
-- `terminal_theme.rs` só com as paletas COSMIC Dark/Light.
+- `terminal_theme.rs` só com as paletas COSMIC Dark/Light;
+- o fundo das mensagens do usuário na TUI do `claude` (`rgb(55,55,55)` no tema escuro dela, `rgb(240,240,240)` no claro;
+  só elas usam esses cinzas, conferido na 2.1.303) vira uma faixa branca com texto preto em todos os temas
+  (`USER_MESSAGE_BG`/`USER_MESSAGE_FG`). Sem isso, a mensagem quase não se distinguia.
 
 `term/mod.rs` substitui o que esses arquivos usavam do cosmic-term (`Config` com os valores padrão de lá, `MenuState`,
 `Action`, que aqui é o `shortcuts::Shortcut`) e tem `spawn()`. Os eventos do PTY chegam por um canal único (`Message::TermEventTx` /
@@ -221,7 +225,7 @@ Para trazer novidades do upstream, compare com o cosmic-term e reaplique só ess
   `cosmic::theme::system_preference()`, que segue as Configurações.
 - Terminais: `term::themes()` inclui a paleta ANSI de cada tema (`terminal_theme::from_palette`) e `Config::syntax_theme`
   escolhe pelo tema atual; na troca, `term::apply_theme` recolore os terminais abertos (chats e abas).
-  Cores truecolor da TUI do `claude` não mudam.
+  Cores truecolor da TUI do `claude` não mudam, menos o fundo das mensagens do usuário (veja Terminal).
 - **Desfoque do fundo**: item `[x] desfoque` no mesmo menu (`Message::ToggleBlur`), gravado em `$XDG_CONFIG_HOME/chube/blur`
   (`on`/`off`; sem o arquivo, ligado) e lido por `themes::blur()`. Desligado, `App::apply_blur` zera o `auto_blur` do `Core`
   (o libcosmic deixa de pedir o blur ao compositor e de usar as cores translúcidas do tema, mesmo com o "frosted" ligado) e

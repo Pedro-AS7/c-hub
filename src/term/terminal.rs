@@ -1,6 +1,7 @@
 // Adaptado de cosmic-term (src/terminal.rs), © System76, GPL-3.0-only.
 // Mudanças: eventos identificados por TabId em vez de (pane, aba); sem TerminalPaneGrid;
-// `pid()` expõe o pid do processo do PTY.
+// `pid()` expõe o pid do processo do PTY; as mensagens do usuário na TUI do `claude` viram
+// uma faixa branca com texto preto (`USER_MESSAGE_BG`).
 
 use alacritty_terminal::{
     Term,
@@ -119,6 +120,18 @@ fn as_dim(mut color: Color) -> Color {
 }
 
 pub static WINDOW_BG_COLOR: AtomicU32 = AtomicU32::new(0xFF000000);
+
+/// Faixa das mensagens do usuário na TUI do `claude`. Ela as pinta de cinza (`rgb(55,55,55)` no
+/// tema escuro, `rgb(240,240,240)` no claro), que quase some sobre o fundo dos temas do Chube.
+const USER_MESSAGE_BG: cosmic_text::Color = cosmic_text::Color::rgb(0xFF, 0xFF, 0xFF);
+const USER_MESSAGE_FG: cosmic_text::Color = cosmic_text::Color::rgb(0x00, 0x00, 0x00);
+
+fn is_user_message_bg(color: Color) -> bool {
+    matches!(
+        color,
+        Color::Spec(Rgb { r: 55, g: 55, b: 55 }) | Color::Spec(Rgb { r: 240, g: 240, b: 240 })
+    )
+}
 
 fn convert_color(colors: &Colors, color: Color) -> cosmic_text::Color {
     let rgb = match color {
@@ -816,6 +829,13 @@ impl Terminal {
                         )
                     };
 
+                    if !indexed.cell.flags.contains(Flags::INVERSE)
+                        && is_user_message_bg(indexed.cell.bg)
+                    {
+                        bg = USER_MESSAGE_BG;
+                        fg = USER_MESSAGE_FG;
+                    }
+
                     if indexed.cell.flags.contains(Flags::HIDDEN) {
                         fg = bg;
                     }
@@ -1219,5 +1239,18 @@ impl Drop for Terminal {
         if let Err(err) = self.notifier.0.send(Msg::Shutdown) {
             log::warn!("Failed to send shutdown message on dropped terminal: {err}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn so_o_cinza_das_mensagens_do_claude_e_trocado() {
+        assert!(is_user_message_bg(Color::Spec(Rgb { r: 55, g: 55, b: 55 })));
+        assert!(is_user_message_bg(Color::Spec(Rgb { r: 240, g: 240, b: 240 })));
+        assert!(!is_user_message_bg(Color::Spec(Rgb { r: 56, g: 55, b: 55 })));
+        assert!(!is_user_message_bg(Color::Named(NamedColor::Background)));
     }
 }
