@@ -50,8 +50,11 @@ src/
   dirs.rs       Resolve o diretório digitado: ".", "~", caminhos, atalhos do fshort (~/.shortcuts)
   usage.rs      Limites do plano via `/usage`
   restore.rs    Lista de chats abertos, gravada a cada mudança e reaberta ao iniciar
-  themes.rs     Temas (sistema, fósforo, neon, gruvbox): paletas, CosmicTheme de cada um, tema gravado
+  themes.rs     Temas (sistema, fósforo, neon, gruvbox, vidro, fumê, transparente, grafite): paletas,
+                CosmicTheme de cada um, tema gravado, pedido de desfoque para a extensão do GNOME
   term/         Terminal portado do cosmic-term (mod.rs substitui config, menu e atalhos de lá)
+gnome/
+  desfoque-chube@pedro/  Extensão do GNOME Shell: vidro fosco atrás da janela do Chube
 ```
 
 ## Integração com o Claude Code (`src/claude.rs`)
@@ -176,6 +179,8 @@ Para trazer novidades do upstream, compare com o cosmic-term e reaplique só ess
 - Sem a barra de título do libcosmic (`core.window.show_headerbar = false`, `content_container = false`): o conteúdo
   ocupa a janela toda. O cabeçalho de cada seção (`section_header`) arrasta a janela e maximiza com clique duplo;
   minimizar/maximizar/fechar (`window_controls`) ficam no fim do cabeçalho da seção mais à direita (terminal, ou chat).
+  O `mouse_area` do iced captura o clique esquerdo mesmo sem `on_press`: um `mouse_area` dentro do cabeçalho (o da roda do
+  mouse nas abas do terminal) precisa repetir o `on_drag`/`on_double_click`, senão a área dele não arrasta a janela.
 - Seções (`card()`): cantos retos, borda de 1 px em cinza claro (`border_color`), espaço de `space_xxs` entre elas e
   dentro delas. O fundo (`background_color`) é pintado **uma vez só**, no container da janela: os cards não têm fundo e os
   terminais usam `.opacity(0.0)` no fundo padrão. Assim, com o tema "frosted" (blur) do COSMIC, as seções ficam translúcidas
@@ -203,8 +208,11 @@ Para trazer novidades do upstream, compare com o cosmic-term e reaplique só ess
 - `[◐]` no cabeçalho "# uso" abre o menu: **sistema** (cores do COSMIC, como antes), **fósforo** (fundo `#000000` até no
   container da janela, bordas cinza `#5A5A5A`, texto verde `#33FF66`), **neon** (gradiente azul translúcido na diagonal,
   bordas ciano com brilho via `Shadow` do container, desfoque do COSMIC) e **gruvbox** (paleta Gruvbox dark, quente e opaca).
+  Mais quatro iguais aos temas de mesmo nome da dock, do painel e dos menus do GNOME (`temas.json` das extensões
+  `temas-*@pedro`): **vidro** (branco translúcido em gradiente), **fumê** (cinza escuro translúcido), **transparente**
+  (sem fundo, só o desfoque mais escuro) e **grafite** (cinza opaco). ANSI do GNOME Terminal.
 - O escolhido fica em `$XDG_CONFIG_HOME/chube/theme` (padrão `~/.config/chube/theme`, uma palavra: `system`, `phosphor`,
-  `neon`, `gruvbox`) e é aplicado no `init`, antes de abrir terminais. O tema atual fica num `static` (`Theme::current`),
+  `neon`, `gruvbox`, `glass`, `smoke`, `transparent`, `graphite`) e é aplicado no `init`, antes de abrir terminais. O tema atual fica num `static` (`Theme::current`),
   lido pelas funções de estilo (`Colors::get`, `window_background`, `border_color`, `card`, `flat_button`).
 - Cada tema próprio vira um `CosmicTheme` (`ThemeBuilder` com fundo, `text_tint`, cores e `frosted_windows`) aplicado com
   `cosmic::command::set_theme`: diálogo, dicas e gaveta seguem o tema. O `CosmicTheme` calcula o próprio tom do texto, então a cor
@@ -213,6 +221,26 @@ Para trazer novidades do upstream, compare com o cosmic-term e reaplique só ess
 - Terminais: `term::themes()` inclui a paleta ANSI de cada tema (`terminal_theme::from_palette`) e `Config::syntax_theme`
   escolhe pelo tema atual; na troca, `term::apply_theme` recolore os terminais abertos (chats e abas).
   Cores truecolor da TUI do `claude` não mudam.
+- **Desfoque do fundo**: item `[x] desfoque` no mesmo menu (`Message::ToggleBlur`), gravado em `$XDG_CONFIG_HOME/chube/blur`
+  (`on`/`off`; sem o arquivo, ligado) e lido por `themes::blur()`. Desligado, `App::apply_blur` zera o `auto_blur` do `Core`
+  (o libcosmic deixa de pedir o blur ao compositor e de usar as cores translúcidas do tema, mesmo com o "frosted" ligado) e
+  `window_background` pinta as cores da paleta opacas (`Palette::solid`: a cor sobre o fundo do terminal do tema; só tirar o
+  alfa deixaria o vidro branco). A troca reaplica o tema com `set_theme`, que é quando o libcosmic refaz o pedido.
+- **Desfoque no GNOME** (o Mutter não atende o pedido do libcosmic): extensão própria em `gnome/desfoque-chube@pedro/`,
+  instalada e ligada pelo `install.sh` (vale depois de relogar; também está no `aplicar.sh` do GNOME). Usa a mesma camada
+  de vidro fosco da dock, do painel e dos menus (`desfoque.js`, cópia do da `temas-janelas@pedro`, que copia só as janelas
+  de baixo): um filho do `MetaWindowActor` do Chube, por baixo do conteúdo, recortado com os cantos da janela.
+  O filho é uma `BaseCamada`, que não se desenha dentro da cópia que outra camada faz da janela (desenhá-lo lá,
+  com as janelas em monitores diferentes, estragava o vidro da janela de baixo; veja o `desfoque.js`).
+  Quem decide é o Chube: `App::apply_blur` grava `~/.config/chube/desfoque` (`themes::save_blur_request`) com
+  `on <raio> <brilho %> <cantos>` (o `Palette::blur` do tema e o raio dos cantos da janela) ou `off` (desfoque desligado ou
+  tema opaco), e a extensão acompanha o arquivo. No tema do sistema, pede quando o fundo do COSMIC é translúcido.
+- O fundo da janela tem os mesmos cantos que o libcosmic dá à janela (`window_corner_radius`: `radius_s` + 4, retos com
+  `sharp_corners`); antes ele saía quadrado para fora da borda redonda.
+- Testar a extensão sem relogar: um GNOME Shell `--headless --wayland-display=<nome>` com dconf, `XDG_DATA_HOME` e
+  `XDG_CONFIG_HOME` próprios (exportados antes do `dbus-run-session`), a extensão ligada por link na pasta de extensões
+  dele, uma extensão que liga o `unsafe_mode` (para o `Eval` e a captura pelo D-Bus) e o Chube aberto com
+  `WAYLAND_DISPLAY=<nome>` e o mesmo `XDG_CONFIG_HOME`.
 - Testar um tema sem mexer no escolhido: gravar o nome em `~/.config/chube/theme`, abrir com `XDG_STATE_HOME=<pasta>` e capturar a tela.
 
 ## Verificar a UI

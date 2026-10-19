@@ -5,6 +5,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use cosmic::app::{Core, Task};
+use cosmic::core::Auto;
 use cosmic::iced::keyboard::{Key, key::Named};
 use cosmic::iced::font::Weight;
 use cosmic::iced::widget::scrollable;
@@ -21,7 +22,7 @@ use crate::restore::{self, OpenChat, OpenChats};
 use crate::sessions::{self, Running, SavedSession, Stats};
 use crate::shortcuts::{self, Shortcut};
 use crate::term::{self, Terminal};
-use crate::themes::Theme;
+use crate::themes::{self, Theme};
 use crate::usage::{self, Limit, Window};
 
 /// Intervalo de atualização automática do painel de uso.
@@ -83,6 +84,8 @@ pub enum Message {
     /// Tema escolhido (índice em `Theme::ALL`).
     SetTheme(usize),
     ThemeMenu(bool),
+    /// Liga/desliga o desfoque do fundo.
+    ToggleBlur,
     ModeStep(term::TabId),
     ComposerAction(text_editor::Action),
     ComposerSend,
@@ -267,6 +270,8 @@ impl Application for App {
         // O tema escolhido vale antes de abrir qualquer terminal (as cores vêm dele).
         let theme = Theme::load();
         theme.make_current();
+        themes::set_blur(themes::load_blur());
+        app.apply_blur();
         let theme = match theme {
             Theme::System => Task::none(),
             theme => cosmic::command::set_theme(theme.cosmic()),
@@ -373,6 +378,7 @@ impl Application for App {
 
     fn view(&self) -> Element<'_, Message> {
         let space = theme::spacing();
+        let sharp = self.core.window.sharp_corners;
 
         widget::container(
             pane_grid::PaneGrid::new(&self.panes, |_pane, section, _maximized| {
@@ -383,9 +389,14 @@ impl Application for App {
             .on_resize(10, Message::PaneResized),
         )
         .padding(space.space_xxs)
-        // Sem o `content_container` do libcosmic, o fundo da janela é daqui.
-        .class(theme::Container::custom(|theme| widget::container::Style {
+        // Sem o `content_container` do libcosmic, o fundo da janela é daqui. Com os mesmos cantos
+        // que o libcosmic dá à janela: sem eles, o fundo sai quadrado para fora da borda redonda.
+        .class(theme::Container::custom(move |theme| widget::container::Style {
             background: Some(window_background(theme)),
+            border: Border {
+                radius: if sharp { 0.0 } else { window_corner_radius(theme) }.into(),
+                ..Default::default()
+            },
             ..Default::default()
         }))
         .into()
@@ -543,7 +554,19 @@ impl App {
                 for terminal in chats.chain(tabs) {
                     term::apply_theme(&mut terminal.lock().unwrap(), &cosmic_theme);
                 }
+                // Tema opaco não pede desfoque à extensão do GNOME (gastaria a GPU à toa).
+                self.apply_blur();
                 return cosmic::command::set_theme(cosmic_theme);
+            }
+            Message::ToggleBlur => {
+                let on = !themes::blur();
+                themes::set_blur(on);
+                if let Err(error) = themes::save_blur(on) {
+                    log::error!("não consegui gravar o desfoque: {error}");
+                }
+                self.apply_blur();
+                // Reaplicar o tema faz o libcosmic refazer o pedido de blur da janela.
+                return cosmic::command::set_theme(Theme::current().cosmic());
             }
             Message::SetMode(index) => {
                 self.mode_menu = false;
@@ -1439,7 +1462,30 @@ impl App {
         popover.into()
     }
 
-    /// `[◐]` com o menu de temas.
+    /// Sem nenhum `Auto`, o libcosmic não pede o blur ao compositor nem usa as cores
+    /// translúcidas do tema, mesmo com o "frosted" ligado nele. No GNOME, o pedido vai para a
+    /// extensão `desfoque-chube@pedro`, por arquivo, com a intensidade do tema.
+    fn apply_blur(&mut self) {
+        self.core.set_auto_blur(if themes::blur() {
+            Auto::System | Auto::Popup | Auto::Window
+        } else {
+            Default::default()
+        });
+        let request = match Theme::current().palette() {
+            Some(palette) => palette.blur,
+            None => {
+                let theme = theme::active();
+                (theme.cosmic().background(theme.transparent).base.alpha < 1.0).then_some(themes::DOCK_BLUR)
+            }
+        };
+        // Com a janela maximizada, o libcosmic deixa os cantos retos, e a extensão também.
+        let corner = window_corner_radius(&Theme::current().cosmic());
+        if let Err(error) = themes::save_blur_request(request.filter(|_| themes::blur()), corner) {
+            log::error!("não consegui gravar o pedido de desfoque: {error}");
+        }
+    }
+
+    /// `[◐]` com o menu de temas e a opção do desfoque.
     fn theme_selector(&self) -> Element<'_, Message> {
         let colors = Colors::get();
         let current = Theme::current();
@@ -1464,6 +1510,10 @@ impl App {
                         .on_press(Message::SetTheme(index)),
                 );
             }
+            let blur = if themes::blur() { "[x] desfoque" } else { "[ ] desfoque" };
+            menu = menu
+                .push(tinted("fundo", colors.dim))
+                .push(flat_button(mono(blur), false).width(Length::Fill).on_press(Message::ToggleBlur));
             popover = popover.popup(menu_card(menu).width(Length::Fixed(160.0)));
         }
         popover.into()
@@ -1676,7 +1726,8 @@ impl App {
             .push(mono(" "))
             .push(
                 // A roda do mouse (vertical) rola as abas na horizontal; Shift+roda o scrollable
-                // já trata sozinho.
+                // já trata sozinho. Este `mouse_area` captura o clique esquerdo, que assim não
+                // chega ao do `section_header`: o arrasto e o clique duplo são repetidos aqui.
                 widget::mouse_area(
                     widget::scrollable(tabs)
                         .id(self.terminal_tabs_id.clone())
@@ -1685,6 +1736,8 @@ impl App {
                         ))
                         .width(Length::Fill),
                 )
+                .on_drag(Message::DragWindow)
+                .on_double_click(Message::ToggleMaximize)
                 .on_scroll(|delta| {
                     Message::TerminalTabsWheel(match delta {
                         cosmic::iced::mouse::ScrollDelta::Lines { y, .. } => -y * 60.0,
@@ -1762,18 +1815,27 @@ impl Colors {
 }
 
 /// Fundo da janela. No tema do sistema, o mesmo do terminal, que assim não destoa; nos
-/// próprios, o da paleta (no neon, um gradiente na diagonal).
+/// próprios, o da paleta (no neon e no vidro, um gradiente na diagonal). Com o desfoque
+/// desligado, opaco.
 fn window_background(theme: &cosmic::Theme) -> Background {
     let Some(palette) = Theme::current().palette() else {
         return Color::from(theme.cosmic().background(theme.transparent).base).into();
     };
+    let solid = |color: Color| if themes::blur() { color } else { palette.solid(color) };
     match palette.window_end {
         Some(end) => cosmic::iced::gradient::Linear::new(Radians(2.4))
-            .add_stop(0.0, palette.window)
-            .add_stop(1.0, end)
+            .add_stop(0.0, solid(palette.window))
+            .add_stop(1.0, solid(end))
             .into(),
-        None => palette.window.into(),
+        None => solid(palette.window).into(),
     }
+}
+
+/// Raio dos cantos da janela, com o mesmo cálculo do libcosmic (`window_corner_radius`, em
+/// `app/mod.rs`), que assim alinha o conteúdo com a borda.
+fn window_corner_radius(theme: &cosmic::Theme) -> f32 {
+    let radius = theme.cosmic().radius_s()[0];
+    if radius < 4.0 { radius } else { radius + 4.0 }
 }
 
 /// Cor das bordas e linhas: a da paleta ou um cinza mais claro que o fundo.
@@ -1817,7 +1879,7 @@ fn card<'a>(content: impl Into<Element<'a, Message>>) -> widget::Container<'a, M
 fn menu_card<'a>(content: impl Into<Element<'a, Message>>) -> widget::Container<'a, Message, cosmic::Theme> {
     card(content).height(Length::Shrink).class(theme::Container::custom(|theme| {
         let background = match Theme::current().palette() {
-            Some(palette) => Color { a: 1.0, ..palette.window },
+            Some(palette) => palette.solid(palette.window),
             None => theme.cosmic().background(false).base.into(),
         };
         widget::container::Style {

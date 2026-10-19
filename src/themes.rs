@@ -1,11 +1,16 @@
-//! Temas do Chube: o do sistema (cores do COSMIC) e três próprios. O escolhido fica em
-//! `~/.config/chube/theme` e vale para a interface, os diálogos do libcosmic (um
-//! `CosmicTheme` montado a partir da paleta) e as cores dos terminais.
+//! Temas do Chube: o do sistema (cores do COSMIC) e sete próprios. O escolhido fica em
+//! `~/.config/chube/theme` (e o desfoque do fundo, ligado ou não, em `~/.config/chube/blur`) e
+//! vale para a interface, os diálogos do libcosmic (um `CosmicTheme` montado a partir da paleta)
+//! e as cores dos terminais.
+//!
+//! No GNOME, quem desfoca atrás da janela é a extensão `desfoque-chube@pedro` (em `gnome/`), a
+//! mesma camada de vidro fosco da dock, do painel e dos menus. O Chube grava o pedido em
+//! `~/.config/chube/desfoque` (`save_blur_request`), que a extensão acompanha.
 
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use cosmic::cosmic_theme::palette::{Srgb, Srgba};
 use cosmic::cosmic_theme::{BlurStrength, ThemeBuilder};
@@ -24,13 +29,53 @@ pub enum Theme {
     Neon,
     /// Paleta Gruvbox: tons quentes e contraste baixo, para o dia a dia.
     Gruvbox,
+    /// Vidro claro, como o tema "Vidro" da dock, do painel e dos menus.
+    Glass,
+    /// Vidro escuro, como o "Fumê" dos menus.
+    Smoke,
+    /// Sem fundo: só o desfoque (e um escurecido leve dele) atrás do texto.
+    Transparent,
+    /// Cinza opaco, como o "Grafite" da dock, do painel e dos menus.
+    Graphite,
 }
 
 /// Tema em uso, lido pelas funções de estilo (que não recebem o `App`).
 static CURRENT: AtomicU8 = AtomicU8::new(0);
 
+/// Desfoque do fundo ligado, lido pelas mesmas funções.
+static BLUR: AtomicBool = AtomicBool::new(true);
+
+/// Com o desfoque desligado, a janela não pede o blur ao compositor e o fundo é pintado opaco.
+pub fn blur() -> bool {
+    BLUR.load(Ordering::Relaxed)
+}
+
+pub fn set_blur(on: bool) {
+    BLUR.store(on, Ordering::Relaxed);
+}
+
+/// Desfoque gravado; ligado se não houver.
+pub fn load_blur() -> bool {
+    fs::read_to_string(config_dir().join("blur")).map_or(true, |text| text.trim() != "off")
+}
+
+pub fn save_blur(on: bool) -> std::io::Result<()> {
+    let dir = config_dir();
+    fs::create_dir_all(&dir)?;
+    fs::write(dir.join("blur"), if on { "on\n" } else { "off\n" })
+}
+
 impl Theme {
-    pub const ALL: [Theme; 4] = [Theme::System, Theme::Phosphor, Theme::Neon, Theme::Gruvbox];
+    pub const ALL: [Theme; 8] = [
+        Theme::System,
+        Theme::Phosphor,
+        Theme::Neon,
+        Theme::Gruvbox,
+        Theme::Glass,
+        Theme::Smoke,
+        Theme::Transparent,
+        Theme::Graphite,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -38,6 +83,10 @@ impl Theme {
             Theme::Phosphor => "fósforo",
             Theme::Neon => "neon",
             Theme::Gruvbox => "gruvbox",
+            Theme::Glass => "vidro",
+            Theme::Smoke => "fumê",
+            Theme::Transparent => "transparente",
+            Theme::Graphite => "grafite",
         }
     }
 
@@ -48,6 +97,10 @@ impl Theme {
             Theme::Phosphor => "phosphor",
             Theme::Neon => "neon",
             Theme::Gruvbox => "gruvbox",
+            Theme::Glass => "glass",
+            Theme::Smoke => "smoke",
+            Theme::Transparent => "transparent",
+            Theme::Graphite => "graphite",
         }
     }
 
@@ -66,18 +119,16 @@ impl Theme {
 
     /// Tema gravado; o do sistema se não houver (ou se o nome for desconhecido).
     pub fn load() -> Theme {
-        fs::read_to_string(path())
+        fs::read_to_string(config_dir().join("theme"))
             .ok()
             .and_then(|text| Theme::from_id(text.trim()))
             .unwrap_or_default()
     }
 
     pub fn save(self) -> std::io::Result<()> {
-        let path = path();
-        if let Some(dir) = path.parent() {
-            fs::create_dir_all(dir)?;
-        }
-        fs::write(path, format!("{}\n", self.id()))
+        let dir = config_dir();
+        fs::create_dir_all(&dir)?;
+        fs::write(dir.join("theme"), format!("{}\n", self.id()))
     }
 
     /// Paleta própria; `None` no tema do sistema.
@@ -87,6 +138,10 @@ impl Theme {
             Theme::Phosphor => Some(&PHOSPHOR),
             Theme::Neon => Some(&NEON),
             Theme::Gruvbox => Some(&GRUVBOX),
+            Theme::Glass => Some(&GLASS),
+            Theme::Smoke => Some(&SMOKE),
+            Theme::Transparent => Some(&TRANSPARENT),
+            Theme::Graphite => Some(&GRAPHITE),
         }
     }
 
@@ -106,19 +161,39 @@ impl Theme {
         if let Some(neutral) = palette.neutral {
             builder = builder.neutral_tint(srgb(neutral));
         }
-        builder.frosted_windows = palette.frosted;
-        builder.frosted_maximized_apps = palette.frosted;
+        builder.frosted_windows = palette.blur.is_some();
+        builder.frosted_maximized_apps = palette.blur.is_some();
         builder.frosted = BlurStrength::Medium;
         cosmic::Theme::custom(Arc::new(builder.build()))
     }
 }
 
-fn path() -> PathBuf {
+/// Pedido de desfoque para a extensão do GNOME: `on <raio em px> <brilho em %> <cantos em px>`
+/// ou `off`. Os cantos são os da janela, que o libcosmic arredonda (sem os cantos, o desfoque
+/// sairia quadrado para fora deles). Só grava se mudou: a extensão relê a cada mudança.
+pub fn save_blur_request(request: Option<Blur>, corner: f32) -> std::io::Result<()> {
+    let dir = config_dir();
+    fs::create_dir_all(&dir)?;
+    let path = dir.join("desfoque");
+    let text = match request {
+        Some(blur) => format!("on {} {} {corner}\n", blur.radius, blur.brightness),
+        None => "off\n".to_owned(),
+    };
+    if fs::read_to_string(&path).is_ok_and(|old| old == text) {
+        return Ok(());
+    }
+    // Arquivo temporário + rename: a extensão nunca lê um arquivo pela metade.
+    let temp = dir.join(".desfoque.tmp");
+    fs::write(&temp, text)?;
+    fs::rename(temp, path)
+}
+
+fn config_dir() -> PathBuf {
     std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .filter(|dir| dir.is_absolute())
         .unwrap_or_else(|| home_dir().join(".config"))
-        .join("chube/theme")
+        .join("chube")
 }
 
 /// Cores de um tema próprio.
@@ -141,9 +216,32 @@ pub struct Palette {
     pub highlight: Color,
     /// Tom dos controles do libcosmic (botões, campos); `None` deixa o cinza padrão.
     pub neutral: Option<Color>,
-    /// Desfoque do COSMIC atrás da janela, que fica translúcida.
-    pub frosted: bool,
+    /// Desfoque atrás da janela, que fica translúcida (no COSMIC, o do compositor; no GNOME, o
+    /// da extensão). `None`: tema opaco.
+    pub blur: Option<Blur>,
     pub terminal: TerminalPalette,
+}
+
+/// Intensidade do desfoque, nas unidades dos ajustes da dock (`desfoque-intensidade` e
+/// `desfoque-brilho`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Blur {
+    pub radius: u32,
+    /// 100 deixa como está; menos escurece o que aparece atrás.
+    pub brightness: u32,
+}
+
+/// O mesmo da dock e do painel (padrão das extensões `temas-*@pedro`).
+pub const DOCK_BLUR: Blur = Blur { radius: 30, brightness: 85 };
+
+impl Palette {
+    /// A cor como ficaria sobre o fundo do terminal do tema: o fundo opaco, com o desfoque
+    /// desligado e nos menus. Só tirar o alfa deixaria o vidro (branco translúcido) branco.
+    pub fn solid(&self, color: Color) -> Color {
+        let base = rgb(self.terminal.background);
+        let mix = |top: f32, bottom: f32| top * color.a + bottom * (1.0 - color.a);
+        Color::from_rgb(mix(color.r, base.r), mix(color.g, base.g), mix(color.b, base.b))
+    }
 }
 
 /// Cores do terminal em `0xRRGGBB`.
@@ -187,7 +285,7 @@ static PHOSPHOR: Palette = Palette {
     danger: rgb(0xFF4D4D),
     highlight: rgb(0x33FF66),
     neutral: None,
-    frosted: false,
+    blur: None,
     terminal: TerminalPalette {
         ansi: [
             0x000000, 0xFF4D4D, 0x33FF66, 0xE6FF4D, 0x2BD99F, 0x7DFFB3, 0x4DFFD2, 0xB3FFC6, //
@@ -213,7 +311,7 @@ static NEON: Palette = Palette {
     danger: rgb(0xFF4F7B),
     highlight: rgb(0x00E5FF),
     neutral: Some(rgb(0x1F6FA8)),
-    frosted: true,
+    blur: Some(DOCK_BLUR),
     terminal: TerminalPalette {
         ansi: [
             0x0A1A2F, 0xFF4F7B, 0x3DFFB5, 0xFFD166, 0x3D8BFF, 0xC77DFF, 0x00E5FF, 0xBFEFFF, //
@@ -239,7 +337,7 @@ static GRUVBOX: Palette = Palette {
     danger: rgb(0xFB4934),
     highlight: rgb(0xEBDBB2),
     neutral: Some(rgb(0x7C6F64)),
-    frosted: false,
+    blur: None,
     terminal: TerminalPalette {
         ansi: [
             0x282828, 0xCC241D, 0x98971A, 0xD79921, 0x458588, 0xB16286, 0x689D6A, 0xA89984, //
@@ -248,6 +346,118 @@ static GRUVBOX: Palette = Palette {
         foreground: 0xEBDBB2,
         cursor: 0xEBDBB2,
         background: 0x282828,
+    },
+};
+
+// Os quatro abaixo seguem os temas de mesmo nome da dock, do painel e dos menus do GNOME
+// (`temas.json` das extensões `temas-*@pedro`). A paleta ANSI é a do GNOME Terminal (Tango),
+// mais clara no vidro, onde o fundo atrás é claro.
+
+static GLASS: Palette = Palette {
+    window: rgba(0xFFFFFF, 0.14),
+    window_end: Some(rgba(0xFFFFFF, 0.06)),
+    card: None,
+    border: rgba(0xFFFFFF, 0.22),
+    glow: None,
+    text: rgb(0xFFFFFF),
+    dim: rgba(0xFFFFFF, 0.62),
+    // Azul do GNOME (o dos botões ligados nos menus), mais claro para ler sobre o vidro.
+    accent: rgb(0x99C1F1),
+    success: rgb(0x8FF0A4),
+    warning: rgb(0xF9F06B),
+    danger: rgb(0xFF7B63),
+    highlight: rgb(0xFFFFFF),
+    neutral: None,
+    // Um pouco mais escuro que o da dock: atrás de texto miúdo, um papel de parede claro apagaria
+    // as cores do terminal.
+    blur: Some(Blur { radius: 30, brightness: 70 }),
+    terminal: TerminalPalette {
+        ansi: [
+            0x3D3846, 0xFF7B63, 0x8FF0A4, 0xF9F06B, 0x99C1F1, 0xDC8ADD, 0x93DDC2, 0xDEDDDA, //
+            0x9A9996, 0xFFA38C, 0xB5F5C4, 0xFBF5A0, 0xC0D8F6, 0xEAB3EB, 0xB9E9D8, 0xFFFFFF,
+        ],
+        foreground: 0xFFFFFF,
+        cursor: 0xFFFFFF,
+        background: 0x3A3A3C,
+    },
+};
+
+static SMOKE: Palette = Palette {
+    window: rgba(0x181818, 0.55),
+    window_end: None,
+    card: None,
+    border: rgba(0xFFFFFF, 0.14),
+    glow: None,
+    text: rgb(0xF2F2F2),
+    dim: rgba(0xFFFFFF, 0.5),
+    accent: rgb(0x78AEED),
+    success: rgb(0x8FF0A4),
+    warning: rgb(0xF8E45C),
+    danger: rgb(0xF66151),
+    highlight: rgb(0xFFFFFF),
+    neutral: None,
+    blur: Some(DOCK_BLUR),
+    terminal: TerminalPalette {
+        ansi: [
+            0x241F31, 0xF66151, 0x57E389, 0xF8E45C, 0x62A0EA, 0xC061CB, 0x5BC8AF, 0xDEDDDA, //
+            0x77767B, 0xFF7B63, 0x8FF0A4, 0xF9F06B, 0x99C1F1, 0xDC8ADD, 0x93DDC2, 0xFFFFFF,
+        ],
+        foreground: 0xF2F2F2,
+        cursor: 0xF2F2F2,
+        background: 0x181818,
+    },
+};
+
+static TRANSPARENT: Palette = Palette {
+    window: rgba(0x000000, 0.0),
+    window_end: None,
+    card: None,
+    border: rgba(0xFFFFFF, 0.28),
+    glow: None,
+    text: rgb(0xFFFFFF),
+    dim: rgba(0xFFFFFF, 0.6),
+    accent: rgb(0x99C1F1),
+    success: rgb(0x8FF0A4),
+    warning: rgb(0xF9F06B),
+    danger: rgb(0xFF7B63),
+    highlight: rgb(0xFFFFFF),
+    neutral: None,
+    // Sem fundo nenhum, o texto fica legível por um desfoque mais forte e mais escuro.
+    blur: Some(Blur { radius: 40, brightness: 60 }),
+    terminal: TerminalPalette {
+        ansi: [
+            0x3D3846, 0xFF7B63, 0x8FF0A4, 0xF9F06B, 0x99C1F1, 0xDC8ADD, 0x93DDC2, 0xDEDDDA, //
+            0x9A9996, 0xFFA38C, 0xB5F5C4, 0xFBF5A0, 0xC0D8F6, 0xEAB3EB, 0xB9E9D8, 0xFFFFFF,
+        ],
+        foreground: 0xFFFFFF,
+        cursor: 0xFFFFFF,
+        background: 0x1E1E1E,
+    },
+};
+
+static GRAPHITE: Palette = Palette {
+    window: rgb(0x2B2B2B),
+    window_end: None,
+    card: None,
+    border: rgb(0x474747),
+    glow: None,
+    text: rgb(0xE6E6E6),
+    dim: rgb(0x9A9A9A),
+    accent: rgb(0x78AEED),
+    success: rgb(0x57E389),
+    warning: rgb(0xF8E45C),
+    danger: rgb(0xF66151),
+    highlight: rgb(0xFFFFFF),
+    neutral: Some(rgb(0x5E5E5E)),
+    blur: None,
+    terminal: TerminalPalette {
+        ansi: [
+            0x241F31, 0xC01C28, 0x2EC27E, 0xF5C211, 0x1E78E4, 0x9841BB, 0x0AB9DC, 0xC0BFBC, //
+            0x5E5C64, 0xED333B, 0x57E389, 0xF8E45C, 0x51A1FF, 0xC061CB, 0x4FD2FD, 0xF6F5F4,
+        ],
+        foreground: 0xE6E6E6,
+        cursor: 0xE6E6E6,
+        background: 0x2B2B2B,
     },
 };
 
@@ -268,5 +478,16 @@ mod tests {
         for theme in Theme::ALL {
             assert_eq!(theme.palette().is_none(), theme == Theme::System);
         }
+    }
+
+    #[test]
+    fn cor_solida_e_a_mistura_com_o_fundo_do_terminal() {
+        let glass = Theme::Glass.palette().unwrap();
+        let solid = glass.solid(glass.window);
+        assert_eq!(solid.a, 1.0);
+        // 14% de branco sobre o cinza do terminal: mais claro que ele, longe do branco.
+        assert!(solid.r > rgb(glass.terminal.background).r && solid.r < 0.4);
+        let graphite = Theme::Graphite.palette().unwrap();
+        assert_eq!(graphite.solid(graphite.window), graphite.window);
     }
 }
