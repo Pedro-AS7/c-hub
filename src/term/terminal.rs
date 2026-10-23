@@ -123,7 +123,8 @@ pub static WINDOW_BG_COLOR: AtomicU32 = AtomicU32::new(0xFF000000);
 
 /// Faixa das mensagens do usuário na TUI do `claude`. Ela as pinta de cinza (`rgb(55,55,55)` no
 /// tema escuro, `rgb(240,240,240)` no claro), que quase some sobre o fundo dos temas do Chube.
-const USER_MESSAGE_BG: cosmic_text::Color = cosmic_text::Color::rgb(0xFF, 0xFF, 0xFF);
+/// Branco a 50%: o fundo da janela aparece através da faixa.
+const USER_MESSAGE_BG: cosmic_text::Color = cosmic_text::Color::rgba(0xFF, 0xFF, 0xFF, 0x80);
 const USER_MESSAGE_FG: cosmic_text::Color = cosmic_text::Color::rgb(0x00, 0x00, 0x00);
 
 fn is_user_message_bg(color: Color) -> bool {

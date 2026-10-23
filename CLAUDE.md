@@ -164,7 +164,7 @@ mudanças, marcadas no topo de cada arquivo:
   quando a janela recupera o dela (antes era preciso trocar de chat);
 - `terminal_theme.rs` só com as paletas COSMIC Dark/Light;
 - o fundo das mensagens do usuário na TUI do `claude` (`rgb(55,55,55)` no tema escuro dela, `rgb(240,240,240)` no claro;
-  só elas usam esses cinzas, conferido na 2.1.303) vira uma faixa branca com texto preto em todos os temas
+  só elas usam esses cinzas, conferido na 2.1.303) vira uma faixa branca a 50% com texto preto em todos os temas
   (`USER_MESSAGE_BG`/`USER_MESSAGE_FG`). Sem isso, a mensagem quase não se distinguia.
 
 `term/mod.rs` substitui o que esses arquivos usavam do cosmic-term (`Config` com os valores padrão de lá, `MenuState`,
