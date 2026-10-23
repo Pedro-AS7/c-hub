@@ -106,10 +106,17 @@ class CamadaDesfocada extends Clutter.Actor {
             // Ele aparece e some junto com o grupo das janelas (layout.js, _updateVisibility).
             visaoGeral.connectObject('notify::visible', () => this._trocarCopia(), this);
             this._trocarCopia();
+        } else {
+            // A janela trocou de workspace, ou está em todos e o workspace atual mudou.
+            const sincronizar = () => this._sincronizarVisiveis();
+            abaixoDe.meta_window.connectObject('workspace-changed', sincronizar, this);
+            global.workspace_manager.connectObject('active-workspace-changed', sincronizar, this);
         }
         this.connect('destroy', () => {
             global.display.disconnectObject(this);
             visaoGeral.disconnectObject(this);
+            abaixoDe?.meta_window.disconnectObject(this);
+            global.workspace_manager.disconnectObject(this);
         });
     }
 
@@ -128,12 +135,42 @@ class CamadaDesfocada extends Clutter.Actor {
             const posicao = janelas.indexOf(this._abaixoDe);
             janelas = posicao >= 0 ? janelas.slice(0, posicao) : [];
         }
+        const sincronizar = () => this._sincronizarVisiveis();
         this._janelas = janelas.map(janela => {
             const copia = copiar(janela);
-            janela.bind_property('visible', copia, 'visible', GObject.BindingFlags.SYNC_CREATE);
+            if (this._abaixoDe) {
+                // Os sinais saem junto com a cópia (dona deles), a cada nova cópia.
+                janela.connectObject('notify::visible', sincronizar, copia);
+                janela.meta_window.connectObject('workspace-changed', sincronizar,
+                    'notify::minimized', sincronizar, copia);
+            } else {
+                janela.bind_property('visible', copia, 'visible', GObject.BindingFlags.SYNC_CREATE);
+            }
             this._mesa.add_child(copia);
             return copia;
         });
+        if (this._abaixoDe)
+            this._sincronizarVisiveis();
+    }
+
+    // Atrás de uma janela (abaixoDe) ficam as janelas do workspace dela, e não as que aparecem na
+    // tela agora. Fora do workspace atual, os atores não servem de guia: no gesto de troca de
+    // workspace, as janelas do de destino ainda estão escondidas (o Shell anima cópias delas), e o
+    // vidro mostrava só o papel de parede; na visão geral, o vidro de uma janela de outro workspace
+    // mostrava as janelas do atual. No workspace atual vale o ator (ele também some no meio de
+    // animações, como a de minimizar).
+    _sincronizarVisiveis() {
+        const gerente = global.workspace_manager;
+        const workspace = this._abaixoDe.meta_window.get_workspace() ?? gerente.get_active_workspace();
+        const atual = workspace === gerente.get_active_workspace();
+        for (const copia of this._janelas) {
+            // Janela já fechada: a cópia sai no próximo "restacked".
+            if (!copia.source)
+                continue;
+            const janela = copia.source.meta_window;
+            const aparece = atual ? copia.source.visible : janela.showing_on_its_workspace();
+            copia.visible = aparece && janela.located_on_workspace(workspace);
+        }
     }
 
     vfunc_paint(contexto) {
