@@ -1,5 +1,8 @@
 # C-hub (chube) — v0.1.0
 
+Nome visível: C-hub, desde 2026-10-23 (repositório github.com/Pedro-AS7/c-hub). Pasta, crate, binário `chube`, ID
+`com.pedro.Chube` e a extensão `desfoque-chube@pedro` mantêm o nome antigo, para não quebrar o que já está instalado.
+
 Chube é um app desktop para o COSMIC (Pop!_OS 24.04, Wayland) que **gerencia sessões do Claude Code e do Codex**: lista de chats ativos, cada um com o `claude` ou o `codex` interativo num terminal integrado, sessões salvas para retomar, sub-chats (fork de sessão), painel de consumo do plano e **terminal integrado com abas**. Usa o login existente de cada CLI; remove as chaves de API herdadas do ambiente ao iniciar os chats.
 
 Rascunho da interface: `chub_racunho.png` (na raiz).
