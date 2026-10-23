@@ -2,7 +2,7 @@
 name = "chube"
 version = "0.1.0"
 edition = "2024"
-description = "Gerenciador de sessões do Claude Code para o COSMIC"
+description = "Gerenciador de sessões do Claude Code e Codex para o COSMIC"
 license = "GPL-3.0-only"
 
 [dependencies]

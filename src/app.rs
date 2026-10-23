@@ -14,6 +14,8 @@ use cosmic::iced::{Alignment, Background, Border, Color, Font, Length, Radians, 
 use cosmic::widget::{self, pane_grid, segmented_button, text_editor, tooltip};
 use cosmic::{Application, ApplicationExt, Element, theme};
 
+use crate::agent::Agent;
+use crate::codex;
 use crate::chat::{Chat, ModeChange, Status};
 use crate::claude::{self, Mode, Start};
 use crate::commands::{self, Command};
@@ -62,6 +64,7 @@ pub enum Message {
     SelectChat(usize),
     NewChat,
     NewChatInput(String),
+    NewChatAgent(usize),
     NewChatConfirm,
     NewChatCancel,
     NewChatBrowse,
@@ -129,11 +132,14 @@ pub struct Polled {
     running: Option<Running>,
     /// Só do chat em foco (é o único mostrado no painel "Uso").
     stats: Option<Stats>,
+    codex: Option<codex::Snapshot>,
+    codex_hint: Option<String>,
 }
 
 /// Opções da linha de comando.
 #[derive(Clone, Debug, Default)]
 pub struct Flags {
+    pub agent: Agent,
     /// Modelo usado nos chats novos (padrão: o do Claude Code).
     pub model: Option<String>,
 }
@@ -144,6 +150,8 @@ pub struct App {
     focused: usize,
     default_dir: PathBuf,
     model: Option<String>,
+    default_agent: Agent,
+    new_chat_agent: Agent,
     /// Id do campo de mensagem do chat (hoje fora da tela).
     composer_id: widget::Id,
     /// Ids dos terminais na tela (o do chat em foco e o da aba ativa), para dar o foco a eles.
@@ -218,6 +226,8 @@ impl Application for App {
             focused: 0,
             default_dir,
             model: flags.model,
+            default_agent: flags.agent,
+            new_chat_agent: flags.agent,
             composer_id: widget::Id::unique(),
             chat_terminal_id: widget::Id::unique(),
             tab_terminal_id: widget::Id::unique(),
@@ -256,7 +266,7 @@ impl Application for App {
         let open = restore::load();
         for saved in &open.chats {
             let id = app.take_terminal_id();
-            let has_file = sessions::session_file(&saved.session_id).is_some();
+            let has_file = saved.agent.session_file(&saved.session_id).is_some();
             app.chats.push(Chat::restore(id, saved, has_file));
         }
         app.focused = open.focused.min(app.chats.len().saturating_sub(1));
@@ -330,6 +340,7 @@ impl Application for App {
         };
         let names: Vec<String> = dirs::shortcuts().into_iter().map(|(name, _)| name).collect();
         let mut control = widget::Column::new()
+            .push(widget::dropdown(&Agent::LABELS, Some(self.new_chat_agent.index()), Message::NewChatAgent))
             .push(
                 widget::text_input("Diretório, atalho do fshort ou .", input)
                     .id(self.new_chat_input_id.clone())
@@ -413,10 +424,14 @@ impl App {
                 }
             }
             Message::NewChat => {
+                self.new_chat_agent = self.chats.get(self.focused).map_or(self.default_agent, |chat| chat.agent);
                 self.new_chat_input = Some(String::new());
                 return widget::text_input::focus(self.new_chat_input_id.clone());
             }
             Message::NewChatInput(text) => self.new_chat_input = Some(text),
+            Message::NewChatAgent(index) => {
+                if let Some(agent) = Agent::ALL.get(index) { self.new_chat_agent = *agent; }
+            },
             Message::NewChatCancel => self.new_chat_input = None,
             Message::NewChatConfirm => {
                 let Some(input) = &self.new_chat_input else {
@@ -425,7 +440,7 @@ impl App {
                 if let Ok(folder) = dirs::resolve(input, &self.focused_dir()) {
                     self.new_chat_input = None;
                     let id = self.take_terminal_id();
-                    return self.open_chat(self.chats.len(), Chat::new(id, folder, self.model.clone(), None));
+                    return self.open_chat(self.chats.len(), Chat::new(id, self.new_chat_agent, folder, self.new_model(self.new_chat_agent), None));
                 }
             }
             Message::NewChatBrowse => {
@@ -454,7 +469,12 @@ impl App {
                 self.expanded_dirs = HashSet::from([self.focused_dir()]);
                 self.set_show_context(true);
                 return cosmic::task::future(async {
-                    let list = tokio::task::spawn_blocking(sessions::list)
+                    let list = tokio::task::spawn_blocking(|| {
+                        let mut list = sessions::list();
+                        list.extend(codex::list());
+                        list.sort_by(|a,b| b.modified.cmp(&a.modified));
+                        list
+                    })
                         .await
                         .unwrap_or_default();
                     Message::SessionsLoaded(list)
@@ -472,12 +492,12 @@ impl App {
                     return Task::none();
                 };
                 self.set_show_context(false);
-                if let Some(open) = self.chat_index_for_session(&saved.id) {
+                if let Some(open) = self.chat_index_for_session(saved.agent, &saved.id) {
                     self.focused = open;
                     return self.focus_chat();
                 }
                 let id = self.take_terminal_id();
-                return self.open_chat(self.chats.len(), Chat::resume(id, &saved, self.model.clone()));
+                return self.open_chat(self.chats.len(), Chat::resume(id, &saved, self.new_model(saved.agent)));
             }
             Message::SubChat => {
                 let id = self.take_terminal_id();
@@ -503,8 +523,9 @@ impl App {
                     return Task::none();
                 };
                 let id = chat.id;
+                let agent = chat.agent;
                 return cosmic::task::future(async move {
-                    let saved = tokio::task::spawn_blocking(move || sessions::session_file(&session_id).is_some())
+                    let saved = tokio::task::spawn_blocking(move || agent.session_file(&session_id).is_some())
                         .await
                         .unwrap_or(false);
                     Message::OpenInTerminalChecked(id, saved)
@@ -521,7 +542,7 @@ impl App {
                 };
                 let pid = chat.pid();
                 let cwd = chat.cwd.clone();
-                let command = claude::command(&Start::Resume { session_id }, chat.model.as_deref(), None);
+                let command = chat.agent.command(&Start::Resume { session_id }, chat.model.as_deref(), None);
                 let close = self.close_chat(index);
                 let open = cosmic::task::future(async move {
                     Message::OpenedInTerminal(open_in_terminal(pid, cwd, command).await)
@@ -575,7 +596,7 @@ impl App {
                 };
                 let target = Mode::ALL[index.min(Mode::ALL.len() - 1)];
                 chat.read_mode();
-                if chat.mode == Some(target) || !chat.is_alive() {
+                if chat.agent != Agent::Claude || chat.mode == Some(target) || !chat.is_alive() {
                     return Task::none();
                 }
                 chat.mode_change = Some(ModeChange {
@@ -610,7 +631,7 @@ impl App {
                 };
                 chat.composer.perform(action);
                 // Os comandos do usuário e do projeto são lidos na primeira `/`.
-                if chat.commands.is_none() && chat.composer.text().starts_with('/') {
+                if chat.agent == Agent::Claude && chat.commands.is_none() && chat.composer.text().starts_with('/') {
                     chat.commands = Some(Vec::new());
                     let (id, cwd) = (chat.id, chat.cwd.clone());
                     return cosmic::task::future(async move {
@@ -808,6 +829,9 @@ impl App {
 
     /// Busca os limites com o `/usage`, se já não houver uma busca em andamento.
     fn refresh_usage(&mut self) -> Task<Message> {
+        if self.chats.get(self.focused).map_or(self.default_agent, |chat| chat.agent) == Agent::Codex {
+            return self.poll();
+        }
         if self.fetching_usage {
             return Task::none();
         }
@@ -817,6 +841,9 @@ impl App {
 
     /// Busca a janela de contexto do modelo do chat em foco, se ainda não foi buscada.
     fn fetch_context_window(&mut self) -> Task<Message> {
+        if self.chats.get(self.focused).is_none_or(|chat| chat.agent != Agent::Claude) {
+            return Task::none();
+        }
         let Some(model) = self.chats.get(self.focused).and_then(|chat| chat.active_model.clone())
         else {
             return Task::none();
@@ -861,6 +888,11 @@ impl App {
         self.panes = pane_grid::State::with_configuration(layout);
     }
 
+    // --model se aplica apenas ao agente escolhido na linha de comando.
+    fn new_model(&self, agent: Agent) -> Option<String> {
+        (agent == self.default_agent).then(|| self.model.clone()).flatten()
+    }
+
     fn focused_dir(&self) -> PathBuf {
         self.chats
             .get(self.focused)
@@ -884,11 +916,11 @@ impl App {
         if chat.terminal.is_some() || !chat.is_alive() || chat.status == Status::Suspended {
             return;
         }
-        let command = claude::command(&chat.start, chat.model.as_deref(), chat.prompt.take().as_deref());
+        let command = chat.agent.command(&chat.start, chat.model.as_deref(), chat.prompt.take().as_deref());
         match term::spawn(chat.id, events, chat.cwd.clone(), Some(command), &theme::active()) {
             Ok(terminal) => chat.terminal = Some(terminal),
             Err(err) => {
-                log::error!("não consegui abrir o claude: {err}");
+                log::error!("não consegui abrir {}: {err}", chat.agent.label());
                 chat.status = Status::Exited;
             }
         }
@@ -913,7 +945,7 @@ impl App {
             .chats
             .iter()
             .enumerate()
-            .filter(|(_, chat)| chat.session_id.is_some())
+            .filter(|(_, chat)| chat.session_id.is_some() || matches!(chat.start, Start::New { .. }))
             .collect();
         let open = OpenChats {
             focused: with_id
@@ -923,7 +955,8 @@ impl App {
             chats: with_id
                 .iter()
                 .map(|(_, chat)| OpenChat {
-                    session_id: chat.session_id.clone().unwrap_or_default(),
+                    agent: chat.agent,
+                    session_id: chat.session_id.clone().unwrap_or_else(|| format!("draft:{}", chat.id)),
                     cwd: chat.cwd.clone(),
                     title: chat.title.clone(),
                     model: chat.model.clone(),
@@ -1001,18 +1034,26 @@ impl App {
             return Task::none();
         }
         let focused = self.chats.get(self.focused).map(|chat| chat.id);
-        let targets: Vec<(term::TabId, Option<u32>, Option<String>)> = self
+        let targets: Vec<(term::TabId, Agent, Option<u32>, Option<String>, Option<String>)> = self
             .chats
             .iter()
             .filter(|chat| chat.is_alive())
-            .map(|chat| (chat.id, chat.pid(), chat.session_id.clone()))
+            .map(|chat| (chat.id, chat.agent, chat.pid(), chat.session_id.clone(), chat.codex_thread_hint.clone()))
             .collect();
         self.polling = true;
         cosmic::task::future(async move {
             let list = tokio::task::spawn_blocking(move || {
                 targets
                     .into_iter()
-                    .map(|(chat, pid, session_id)| {
+                    .map(|(chat, agent, pid, session_id, hint)| {
+                        if agent == Agent::Codex {
+                            let session_id = hint.as_deref().and_then(codex::resolve_hint).or(session_id);
+                            let snapshot = session_id.as_deref().and_then(codex::snapshot);
+                            let running = snapshot.as_ref().and_then(|_| session_id.clone()).map(|session_id| Running {
+                                session_id, status: String::new(),
+                            });
+                            return Polled { chat, running, stats: None, codex: snapshot, codex_hint: hint };
+                        }
                         let running = pid.and_then(sessions::running);
                         let session_id = running
                             .as_ref()
@@ -1021,7 +1062,7 @@ impl App {
                         let stats = (Some(chat) == focused)
                             .then(|| session_id.as_deref().and_then(sessions::stats))
                             .flatten();
-                        Polled { chat, running, stats }
+                        Polled { chat, running, stats, codex: None, codex_hint: None }
                     })
                     .collect()
             })
@@ -1039,7 +1080,11 @@ impl App {
             let Some(chat) = self.chats.iter_mut().find(|chat| chat.id == polled.chat) else {
                 continue;
             };
-            // O `claude` pode ter saído depois da leitura.
+            // /new ou /resume pode ter trocado a conversa enquanto o disco era lido.
+            if chat.agent == Agent::Codex && chat.codex_thread_hint != polled.codex_hint {
+                continue;
+            }
+            // O processo pode ter saído depois da leitura.
             if !chat.is_alive() {
                 continue;
             }
@@ -1058,6 +1103,15 @@ impl App {
                     chat.status = status;
                 }
             }
+            if let Some(snapshot) = polled.codex {
+                if let Some(status) = snapshot.status { chat.status = status; }
+                else if chat.status == Status::Starting { chat.status = Status::Ready; }
+                chat.context_tokens = snapshot.context_tokens;
+                chat.context_window = snapshot.context_window;
+                if snapshot.model.is_some() { chat.active_model = snapshot.model; }
+                if let Some(title) = snapshot.title { chat.title = title; }
+                if !snapshot.limits.is_empty() { chat.codex_limits = snapshot.limits; }
+            }
             if let Some(stats) = polled.stats {
                 chat.context_tokens = stats.context_tokens;
                 if stats.model.is_some() {
@@ -1067,10 +1121,10 @@ impl App {
         }
     }
 
-    fn chat_index_for_session(&self, session_id: &str) -> Option<usize> {
+    fn chat_index_for_session(&self, agent: Agent, session_id: &str) -> Option<usize> {
         self.chats
             .iter()
-            .position(|chat| chat.is_alive() && chat.session_id.as_deref() == Some(session_id))
+            .position(|chat| chat.agent == agent && chat.is_alive() && chat.session_id.as_deref() == Some(session_id))
     }
 
     /// Abre um shell numa aba nova, na pasta do chat em foco.
@@ -1127,7 +1181,22 @@ impl App {
         if let Some(chat) = self.chats.iter_mut().find(|chat| chat.id == id) {
             match event {
                 term::Event::Title(title) => {
-                    if let Some(title) = claude::title_from_terminal(&title) {
+                    if chat.agent == Agent::Codex {
+                        if let Some(hint) = codex::title_hint(&title) {
+                            if chat.codex_thread_hint.as_ref() != Some(&hint) {
+                                if chat.session_id.as_ref().is_some_and(|id| !id.starts_with(&hint)) {
+                                    chat.session_id = None;
+                                    chat.context_tokens = 0;
+                                    chat.context_window = None;
+                                    chat.active_model = None;
+                                    chat.title = "Novo chat".into();
+                                }
+                                chat.codex_thread_hint = Some(hint);
+                            }
+                            if chat.status == Status::Starting { chat.status = Status::Ready; }
+                        }
+                    }
+                    if let Some(title) = (chat.agent == Agent::Claude).then(|| claude::title_from_terminal(&title)).flatten() {
                         chat.title = short_title(&title);
                     }
                 }
@@ -1207,7 +1276,7 @@ impl App {
                 _ => colors.dim,
             };
             let second = widget::Row::new()
-                .push(tinted(format!("    {} · ", claude::display_path(&chat.cwd)), colors.dim).wrapping(Wrapping::None))
+                .push(tinted(format!("    {} · {} · ", chat.agent.label(), claude::display_path(&chat.cwd)), colors.dim).wrapping(Wrapping::None))
                 .push(tinted(chat.status.label(), status_color).wrapping(Wrapping::None));
             let item = widget::container(widget::Column::new().push(first).push(second))
                 .width(Length::Fill)
@@ -1250,9 +1319,12 @@ impl App {
         let colors = Colors::get();
         let focused = self.chats.get(self.focused);
         let context_tokens = focused.map_or(0, |chat| chat.context_tokens);
-        let known_window = focused
-            .and_then(|chat| chat.active_model.as_ref())
-            .and_then(|model| self.context_windows.get(model).copied().flatten());
+        let is_codex = focused.is_some_and(|chat| chat.agent == Agent::Codex);
+        let limits = if is_codex { focused.map(|chat| chat.codex_limits.as_slice()).unwrap_or_default() } else { &self.limits };
+        let known_window = if is_codex { focused.and_then(|chat| chat.context_window) } else {
+            focused.and_then(|chat| chat.active_model.as_ref())
+                .and_then(|model| self.context_windows.get(model).copied().flatten())
+        };
         let working = self
             .chats
             .iter()
@@ -1271,13 +1343,13 @@ impl App {
             ))
             .align_y(Alignment::Center);
 
-        let context = if context_tokens == 0 {
+        let context = if context_tokens == 0 || (is_codex && known_window.is_none()) {
             meter("contexto", None, None, None)
         } else {
             // Enquanto o `/context` não responde, chuta 200 mil; acima disso, só pode ser 1 milhão
             // (vale também para um `[1m]` opcional, que o nome do modelo no histórico não mostra).
             let guess: u32 = if context_tokens > 200_000 { 1_000_000 } else { 200_000 };
-            let window = known_window.map_or(guess, |window| window.max(guess));
+            let window = if is_codex { known_window.unwrap_or(1).max(1) } else { known_window.map_or(guess, |window| window.max(guess)) };
             meter(
                 "contexto",
                 Some(context_tokens as f32 / window as f32),
@@ -1287,12 +1359,12 @@ impl App {
         };
 
         let mut body = widget::Column::new().push(context).spacing(space.space_xs);
-        if self.limits.is_empty() {
+        if limits.is_empty() {
             body = body
                 .push(meter("limite 5h", None, None, None))
                 .push(meter("limite semanal", None, None, None));
         }
-        for limit in &self.limits {
+        for limit in limits {
             let label = match &limit.window {
                 Window::Session => "limite 5h".to_owned(),
                 Window::Week(models) if models == "all models" => "limite semanal".to_owned(),
@@ -1306,7 +1378,9 @@ impl App {
             ));
         }
 
-        let status = if self.fetching_usage {
+        let status = if is_codex {
+            tinted("Codex · limites do histórico; /status na sessão", colors.dim)
+        } else if self.fetching_usage {
             tinted("atualizando…", colors.dim)
         } else if let Some(error) = &self.usage_error {
             tinted(format!("erro ao atualizar: {error}"), colors.danger)
@@ -1345,7 +1419,7 @@ impl App {
             return self.no_chat_section();
         };
 
-        let mut details = vec![claude::display_path(&chat.cwd)];
+        let mut details = vec![chat.agent.label().to_owned(), claude::display_path(&chat.cwd)];
         if let Some(model) = chat.active_model.as_ref().or(chat.model.as_ref()) {
             details.push(model.clone());
         }
@@ -1390,7 +1464,7 @@ impl App {
                 .width(Length::Fill)
                 .clip(true),
         );
-        if chat.is_alive() {
+        if chat.is_alive() && chat.agent == Agent::Claude {
             second = second.push(self.mode_selector(chat.mode));
         }
         let header = widget::Column::new()
@@ -1403,17 +1477,17 @@ impl App {
         }
         if !chat.is_alive() {
             let text = if chat.terminal.is_some() {
-                "o claude desta sessão foi encerrado."
+                "o agente desta sessão foi encerrado."
             } else {
-                "não consegui abrir o claude."
+                "não consegui abrir o agente."
             };
             column = column.push(
                 widget::Row::new()
                     .push(tinted(format!("× {text}"), colors.warning).width(Length::Fill))
                     .push(ascii_button(
                         "[reabrir sessão]",
-                        "Retomar a sessão com --resume",
-                        chat.session_id.is_some().then_some(Message::ReopenChat),
+                        "Retomar ou reiniciar esta sessão",
+                        Some(Message::ReopenChat),
                     ))
                     .align_y(Alignment::Center),
             );
@@ -1422,7 +1496,7 @@ impl App {
         let body: Element<'_, Message> = match &chat.terminal {
             Some(terminal) => terminal_view(terminal, self.chat_terminal_id.clone()),
             None => widget::container(tinted(
-                if chat.is_alive() { "iniciando o claude code…" } else { "" },
+                if chat.is_alive() { "iniciando o agente…" } else { "" },
                 colors.dim,
             ))
             .center(Length::Fill)
@@ -1582,7 +1656,7 @@ impl App {
             widget::Column::new()
                 .push_maybe(notice)
                 .push(tinted("$ chube --novo", colors.dim))
-                .push(ascii_button("[+] nova sessão", "Abrir o claude numa pasta", Some(Message::NewChat)))
+                .push(ascii_button("[+] nova sessão", "Abrir Claude Code ou Codex numa pasta", Some(Message::NewChat)))
                 .push(ascii_button("[≡] sessões salvas", "Retomar uma sessão", Some(Message::ShowSessions)))
                 .spacing(space.space_xxs),
         )
@@ -1651,8 +1725,8 @@ impl App {
 
     fn saved_session_item<'a>(&self, index: usize, saved: &'a SavedSession) -> Element<'a, Message> {
         let colors = Colors::get();
-        let open_here = self.chat_index_for_session(&saved.id).is_some();
-        let mut details = sessions::relative_time(saved.modified);
+        let open_here = self.chat_index_for_session(saved.agent, &saved.id).is_some();
+        let mut details = format!("{} · {}", saved.agent.label(), sessions::relative_time(saved.modified));
         let blocked = match (&saved.running, open_here) {
             (_, true) => {
                 details.push_str(" · aberta aqui");
@@ -1665,7 +1739,7 @@ impl App {
             (None, false) => false,
         };
         let running = self
-            .chat_index_for_session(&saved.id)
+            .chat_index_for_session(saved.agent, &saved.id)
             .map(|index| self.chats[index].status)
             .or_else(|| saved.running.as_deref().and_then(Status::from_claude));
         let (glyph, color) = match running {

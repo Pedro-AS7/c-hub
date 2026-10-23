@@ -13,6 +13,7 @@ use crate::claude::home_dir;
 
 #[derive(Clone, Debug)]
 pub struct SavedSession {
+    pub agent: crate::agent::Agent,
     pub id: String,
     pub cwd: PathBuf,
     pub title: String,
@@ -90,6 +91,7 @@ fn summarize(path: &Path, modified: SystemTime) -> Option<SavedSession> {
     // Sem nenhuma mensagem do usuário, não há o que retomar.
     let title = custom_title.or(ai_title).or(last_prompt)?;
     Some(SavedSession {
+        agent: crate::agent::Agent::Claude,
         id,
         cwd: cwd?,
         title: title.lines().next().unwrap_or_default().to_owned(),

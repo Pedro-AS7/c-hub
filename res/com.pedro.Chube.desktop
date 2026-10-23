@@ -1,11 +1,11 @@
 [Desktop Entry]
 Type=Application
 Name=Chube
-GenericName=Sessões do Claude Code
-Comment=Chats do Claude Code, sessões salvas, uso do plano e terminal integrado
+GenericName=Sessões do Claude Code e Codex
+Comment=Chats do Claude Code e Codex, sessões salvas, uso do plano e terminal integrado
 Exec=@BIN@
 Icon=com.pedro.Chube
 Terminal=false
 Categories=Development;
-Keywords=claude;terminal;sessões;ia;
+Keywords=claude;codex;terminal;sessões;ia;
 StartupWMClass=com.pedro.Chube

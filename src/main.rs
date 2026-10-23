@@ -1,3 +1,5 @@
+mod agent;
+mod codex;
 mod app;
 mod chat;
 mod claude;
@@ -50,6 +52,9 @@ fn parse_args() -> app::Flags {
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--model" => flags.model = args.next(),
+            "--agent" => {
+                flags.agent = args.next().as_deref().and_then(agent::Agent::parse).unwrap_or_default();
+            }
             _ => eprintln!("argumento ignorado: {arg}"),
         }
     }

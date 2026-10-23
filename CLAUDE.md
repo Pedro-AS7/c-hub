@@ -1,6 +1,6 @@
 # Chube — v0.1.0
 
-Chube é um app desktop para o COSMIC (Pop!_OS 24.04, Wayland) que **gerencia sessões do Claude Code**: lista de chats ativos, cada um com o `claude` interativo num terminal integrado, sessões salvas para retomar, sub-chats (fork de sessão), painel de consumo do plano e **terminal integrado com abas**. Usa o plano Pro da conta logada no `claude` — nada de API key.
+Chube é um app desktop para o COSMIC (Pop!_OS 24.04, Wayland) que **gerencia sessões do Claude Code e do Codex**: lista de chats ativos, cada um com o `claude` ou o `codex` interativo num terminal integrado, sessões salvas para retomar, sub-chats (fork de sessão), painel de consumo do plano e **terminal integrado com abas**. Usa o login existente de cada CLI; remove as chaves de API herdadas do ambiente ao iniciar os chats.
 
 Rascunho da interface: `chub_racunho.png` (na raiz).
 
@@ -152,6 +152,36 @@ env -u ANTHROPIC_API_KEY claude (--session-id <uuid> | --resume <id> | --resume 
   `assistant` fora de `isSidechain` (`message.usage` e `message.model`). O Claude Code apaga sessões com mais de 30 dias (`cleanupPeriodDays`).
 - `~/.claude/sessions/<pid>.json` — sessões abertas agora (`sessionId`, `status`, `cwd`); conferir `/proc/<pid>`.
   **Não leia os `.key`** do mesmo diretório (têm tokens).
+
+## Integração com o Codex (2026-10-21)
+
+- `src/agent.rs`: `Agent::{Claude,Codex}`, comando e localização do histórico de cada agente. O diálogo "Nova sessão"
+  escolhe o agente e herda a seleção do chat em foco. Lista, cabeçalho e sessões salvas identificam o agente.
+- `src/codex.rs`: `codex` / `codex resume <id>` / `codex fork <id>`, testados na CLI 0.163.0.
+  Preserva modelo, permissões e sandbox configurados pelo usuário. O seletor de modo por Shift+Tab é só do Claude;
+  o Codex usa sua própria TUI. Não carrega sugestões de comandos do Claude para chats Codex.
+- Procura o Codex no PATH, em `~/.local/bin` e nas instalações do nvm (`NVM_DIR` ou `~/.nvm`, versões numéricas em
+  ordem decrescente). Acrescenta o diretório encontrado ao PATH do processo para o wrapper npm achar o Node no launcher.
+  `env -u` remove `OPENAI_API_KEY`, `CODEX_API_KEY`, `CODEX_THREAD_ID` e `CODEX_SESSION_ID` herdados.
+- Passa `-c 'tui.terminal_title=["thread-id"]'` apenas ao processo do chat, sem editar `~/.codex/config.toml`.
+  O título OSC do Codex 0.163.0 abrevia o UUID com `...`: o app resolve o prefixo (mínimo 16 caracteres) contra os
+  arquivos de sessão e só aceita uma correspondência única. Não escolhe a sessão pela pasta, horário ou `--last`.
+  Isso também acompanha `/new`, `/resume` e `/fork` dentro da CLI; uma leitura de disco antiga é descartada se o título mudou.
+- Histórico em `$CODEX_HOME/sessions` (padrão `~/.codex/sessions`): metadados e primeira mensagem para a lista;
+  nomes personalizados de `session_index.jsonl`; descarta subagentes e `source=exec`. Só lê arquivos de histórico,
+  nunca `auth.json`. Lê os últimos 512 KiB para modelo, contexto, tamanho da janela, limites e início/fim de tarefas.
+  Os limites são os últimos registrados nessa conversa; não são uma consulta ao vivo da conta. `/status` na CLI
+  mostra os dados dela. Pedidos de aprovação do Codex não têm detecção separada de status no Chube.
+- `restore::OpenChat` grava `agent`; arquivos antigos sem o campo continuam sendo Claude. Identificadores desconhecidos
+  de agente são ignorados. Chats novos sem histórico são gravados como rascunhos (`draft:<id>`) e voltam como chats
+  novos do mesmo agente. Sub-chats sem id descoberto ainda ficam fora da restauração, como no Claude.
+- Opção `--agent claude|codex` (padrão `claude`): agente inicial do diálogo e destino de `--model`. Ao escolher o outro
+  agente, usa o modelo padrão da própria CLI. Chats restaurados mantêm o modelo gravado.
+- Testes: comandos de criação/retomada/fork, prefixos OSC ambíguos, parser de histórico/contexto/limites, migração da
+  lista antiga e preservação do agente ao restaurar, reabrir e criar sub-chat. A CLI real foi aberta num PTY com
+  configuração temporária, sem enviar pedido ao modelo, confirmando o título OSC abreviado. O teste gráfico headless
+  não pôde iniciar: o sandbox impede criar o socket do D-Bus. Diálogo, cliques, digitação e retomada/fork reais precisam
+  de conferência manual no desktop.
 
 ## Terminal (`src/term/`)
 

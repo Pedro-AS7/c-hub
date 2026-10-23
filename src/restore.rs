@@ -11,6 +11,7 @@ use crate::claude::home_dir;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OpenChat {
+    pub agent: crate::agent::Agent,
     pub session_id: String,
     pub cwd: PathBuf,
     pub title: String,
@@ -59,6 +60,7 @@ fn to_json(open: &OpenChats) -> String {
         .iter()
         .map(|chat| {
             json!({
+                "agent": chat.agent.key(),
                 "session_id": chat.session_id,
                 "cwd": chat.cwd.display().to_string(),
                 "title": chat.title,
@@ -80,6 +82,11 @@ fn parse(text: &str) -> Option<OpenChats> {
         .filter_map(|chat| {
             let field = |key: &str| chat.get(key).and_then(Value::as_str).map(str::to_owned);
             Some(OpenChat {
+                // Ausente nos arquivos anteriores ao suporte ao Codex; desconhecido é ignorado.
+                agent: match field("agent") {
+                    Some(value) => crate::agent::Agent::parse(&value)?,
+                    None => crate::agent::Agent::Claude,
+                },
                 session_id: field("session_id")?,
                 cwd: PathBuf::from(field("cwd")?),
                 title: field("title").unwrap_or_else(|| "Chat".into()),
@@ -98,6 +105,7 @@ mod tests {
 
     fn chat(id: &str, parent: Option<&str>) -> OpenChat {
         OpenChat {
+            agent: crate::agent::Agent::Claude,
             session_id: id.into(),
             cwd: PathBuf::from("/tmp/projeto"),
             title: format!("Chat {id}"),
@@ -127,6 +135,18 @@ mod tests {
         assert_eq!(open.chats[0].session_id, "y");
         assert_eq!(open.chats[0].title, "Chat");
         assert_eq!(open.chats[0].model, None);
+    }
+
+    #[test]
+    fn mixed_agents_and_legacy_state() {
+        let old = parse(r#"{"chats":[{"session_id":"a","cwd":"/tmp"}]}"#).unwrap();
+        assert_eq!(old.chats[0].agent, crate::agent::Agent::Claude);
+        let mut codex = chat("b", None);
+        codex.agent = crate::agent::Agent::Codex;
+        let mixed = OpenChats { chats: vec![old.chats[0].clone(), codex], focused: 1 };
+        assert_eq!(parse(&to_json(&mixed)), Some(mixed));
+        let unknown = parse(r#"{"chats":[{"agent":"outro","session_id":"a","cwd":"/tmp"}]}"#).unwrap();
+        assert!(unknown.chats.is_empty());
     }
 
     #[test]

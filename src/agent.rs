@@ -1,0 +1,44 @@
+//! Agente de cada chat; arquivos antigos continuam sendo do Claude Code.
+use crate::claude::{self, Start};
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Agent {
+    #[default]
+    Claude,
+    Codex,
+}
+
+impl Agent {
+    pub const ALL: [Self; 2] = [Self::Claude, Self::Codex];
+    pub const LABELS: [&'static str; 2] = ["Claude Code", "Codex"];
+
+    pub fn key(self) -> &'static str {
+        match self { Self::Claude => "claude", Self::Codex => "codex" }
+    }
+
+    pub fn label(self) -> &'static str {
+        Self::LABELS[self.index()]
+    }
+
+    pub fn index(self) -> usize {
+        match self { Self::Claude => 0, Self::Codex => 1 }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value { "claude" => Some(Self::Claude), "codex" => Some(Self::Codex), _ => None }
+    }
+
+    pub fn command(self, start: &Start, model: Option<&str>, prompt: Option<&str>) -> (String, Vec<String>) {
+        match self {
+            Self::Claude => claude::command(start, model, prompt),
+            Self::Codex => crate::codex::command(start, model, prompt),
+        }
+    }
+
+    pub fn session_file(self, id: &str) -> Option<std::path::PathBuf> {
+        match self {
+            Self::Claude => crate::sessions::session_file(id),
+            Self::Codex => crate::codex::session_file(id),
+        }
+    }
+}

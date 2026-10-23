@@ -3,6 +3,7 @@ use std::sync::Mutex;
 
 use cosmic::widget::text_editor;
 
+use crate::agent::Agent;
 use crate::claude::{Mode, Start};
 use crate::commands::Command;
 use crate::restore::OpenChat;
@@ -46,6 +47,10 @@ impl Status {
 
 /// Um chat é um `claude` interativo rodando no seu próprio terminal.
 pub struct Chat {
+    pub agent: Agent,
+    pub codex_thread_hint: Option<String>,
+    pub context_window: Option<u32>,
+    pub codex_limits: Vec<crate::usage::Limit>,
     /// Identifica o chat e os eventos do terminal dele (mesma numeração das abas do terminal).
     pub id: term::TabId,
     pub cwd: PathBuf,
@@ -84,16 +89,17 @@ pub struct ModeChange {
 }
 
 impl Chat {
-    pub fn new(id: term::TabId, cwd: PathBuf, model: Option<String>, prompt: Option<String>) -> Self {
+    pub fn new(id: term::TabId, agent: Agent, cwd: PathBuf, model: Option<String>, prompt: Option<String>) -> Self {
         let session_id = uuid::Uuid::new_v4().to_string();
         Self::with_start(
             id,
+            agent,
             cwd,
             model,
             Start::New {
                 session_id: session_id.clone(),
             },
-            Some(session_id),
+            (agent == Agent::Claude).then_some(session_id),
             "Novo chat".into(),
         )
         .with_prompt(prompt)
@@ -103,6 +109,7 @@ impl Chat {
     pub fn resume(id: term::TabId, saved: &SavedSession, model: Option<String>) -> Self {
         Self::with_start(
             id,
+            saved.agent,
             saved.cwd.clone(),
             model,
             Start::Resume {
@@ -120,6 +127,7 @@ impl Chat {
         let mut chat = if saved {
             let mut chat = Self::with_start(
                 id,
+                open.agent,
                 open.cwd.clone(),
                 open.model.clone(),
                 Start::Resume {
@@ -131,7 +139,7 @@ impl Chat {
             chat.parent = open.parent.clone();
             chat
         } else {
-            Self::new(id, open.cwd.clone(), open.model.clone(), None)
+            Self::new(id, open.agent, open.cwd.clone(), open.model.clone(), None)
         };
         chat.status = Status::Suspended;
         chat
@@ -142,6 +150,7 @@ impl Chat {
         let parent_session_id = self.session_id.clone()?;
         let mut chat = Self::with_start(
             id,
+            self.agent,
             self.cwd.clone(),
             self.model.clone(),
             Start::Fork { parent_session_id },
@@ -156,9 +165,12 @@ impl Chat {
 
     /// Abre de novo uma sessão encerrada, no mesmo lugar da lista.
     pub fn reopen(&self, id: term::TabId) -> Option<Self> {
-        let session_id = self.session_id.clone()?;
+        let Some(session_id) = self.session_id.clone() else {
+            return Some(Self::new(id, self.agent, self.cwd.clone(), self.model.clone(), None));
+        };
         let mut chat = Self::with_start(
             id,
+            self.agent,
             self.cwd.clone(),
             self.model.clone(),
             Start::Resume {
@@ -175,6 +187,7 @@ impl Chat {
 
     fn with_start(
         id: term::TabId,
+        agent: Agent,
         cwd: PathBuf,
         model: Option<String>,
         start: Start,
@@ -182,6 +195,10 @@ impl Chat {
         title: String,
     ) -> Self {
         Self {
+            agent,
+            codex_thread_hint: None,
+            context_window: None,
+            codex_limits: Vec::new(),
             id,
             cwd,
             model,
@@ -226,6 +243,7 @@ impl Chat {
 
     /// Relê o modo no rodapé da TUI; mantém o anterior se o rodapé não está na tela.
     pub fn read_mode(&mut self) {
+        if self.agent != Agent::Claude { return; }
         let Some(Ok(terminal)) = self.terminal.as_ref().map(Mutex::lock) else {
             return;
         };
@@ -237,5 +255,43 @@ impl Chat {
     /// Pid do `claude` deste chat.
     pub fn pid(&self) -> Option<u32> {
         self.terminal.as_ref()?.lock().ok()?.pid()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn codex_session_keeps_its_agent_when_restored_forked_and_reopened() {
+        let open = OpenChat {
+            agent: Agent::Codex, session_id: "sessao-codex".into(), cwd: "/tmp".into(),
+            title: "Teste".into(), model: Some("modelo-codex".into()), parent: None,
+        };
+        let restored = Chat::restore(1, &open, true);
+        assert_eq!(restored.agent, Agent::Codex);
+        assert_eq!(restored.status, Status::Suspended);
+        assert!(matches!(restored.start, Start::Resume { .. }));
+        for chat in [restored.fork(2).unwrap(), restored.reopen(3).unwrap()] {
+            assert_eq!(chat.agent, Agent::Codex);
+            assert_eq!(chat.model.as_deref(), Some("modelo-codex"));
+        }
+        assert_eq!(restored.fork(2).unwrap().session_id, None);
+    }
+
+    #[test]
+    fn missing_codex_history_starts_a_new_codex_chat() {
+        let open = OpenChat {
+            agent: Agent::Codex, session_id: "draft:1".into(), cwd: "/tmp".into(),
+            title: "Novo chat".into(), model: None, parent: None,
+        };
+        let chat = Chat::restore(1, &open, false);
+        assert_eq!(chat.agent, Agent::Codex);
+        assert_eq!(chat.session_id, None);
+        assert!(matches!(chat.start, Start::New { .. }));
+        assert!(chat.fork(2).is_none());
+        assert_eq!(chat.reopen(3).unwrap().agent, Agent::Codex);
+        let claude = Chat::new(2, Agent::Claude, "/tmp".into(), None, None);
+        assert!(claude.session_id.is_some());
     }
 }
