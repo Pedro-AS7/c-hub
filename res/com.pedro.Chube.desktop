@@ -1,6 +1,6 @@
 [Desktop Entry]
 Type=Application
-Name=Chube
+Name=C-hub
 GenericName=Sessões do Claude Code e Codex
 Comment=Chats do Claude Code e Codex, sessões salvas, uso do plano e terminal integrado
 Exec=@BIN@

@@ -1,4 +1,4 @@
-# Chube — v0.1.0
+# C-hub (chube) — v0.1.0
 
 Chube é um app desktop para o COSMIC (Pop!_OS 24.04, Wayland) que **gerencia sessões do Claude Code e do Codex**: lista de chats ativos, cada um com o `claude` ou o `codex` interativo num terminal integrado, sessões salvas para retomar, sub-chats (fork de sessão), painel de consumo do plano e **terminal integrado com abas**. Usa o login existente de cada CLI; remove as chaves de API herdadas do ambiente ao iniciar os chats.
 

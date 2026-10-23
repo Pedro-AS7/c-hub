@@ -273,7 +273,7 @@ impl Application for App {
         app.open_chats = open;
 
         let title = match app.core.main_window_id() {
-            Some(id) => app.set_window_title("Chube".into(), id),
+            Some(id) => app.set_window_title("C-hub".into(), id),
             None => Task::none(),
         };
         let usage = app.refresh_usage();
@@ -2075,7 +2075,7 @@ fn window_controls<'a>() -> Element<'a, Message> {
         .push(tinted("│", Colors::get().dim))
         .push(ascii_button("–", "Minimizar", Some(Message::Minimize)))
         .push(ascii_button("□", "Maximizar", Some(Message::ToggleMaximize)))
-        .push(ascii_button("×", "Fechar o Chube", Some(Message::CloseWindow)))
+        .push(ascii_button("×", "Fechar o C-hub", Some(Message::CloseWindow)))
         .into()
 }
 

@@ -1,4 +1,4 @@
-# Chube
+# C-hub
 
 Gerenciador de sessões do [Claude Code](https://claude.com/claude-code) e do [Codex](https://learn.chatgpt.com/docs/cli/reference) para o desktop COSMIC (Pop!_OS 24.04, Wayland),
 feito em Rust com o [libcosmic](https://github.com/pop-os/libcosmic).
@@ -13,7 +13,7 @@ feito em Rust com o [libcosmic](https://github.com/pop-os/libcosmic).
 
 Escolha **Claude Code** ou **Codex** no diálogo "Nova sessão". Chats dos dois agentes convivem na mesma lista, identificados pelo nome. Sessões salvas, retomada, sub-chats e restauração ao abrir preservam o agente de origem.
 
-Usa o login existente de cada CLI. O seletor de permissões do Chube é exclusivo do Claude; no Codex, use os controles da própria TUI (`/permissions`, `/plan`, `/model`). Limites e contexto do Codex vêm do histórico local, quando disponíveis; `/status` mostra os dados da CLI.
+Usa o login existente de cada CLI. O seletor de permissões do C-hub é exclusivo do Claude; no Codex, use os controles da própria TUI (`/permissions`, `/plan`, `/model`). Limites e contexto do Codex vêm do histórico local, quando disponíveis; `/status` mostra os dados da CLI.
 
 > Projeto pessoal, sem ligação com a Anthropic ou a OpenAI.
 
