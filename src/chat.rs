@@ -24,6 +24,8 @@ pub enum Status {
     /// O Claude Code espera uma resposta (permissão, pergunta).
     Waiting,
     Ready,
+    /// Acabou de trabalhar enquanto estava fora de foco: "terminou" até o chat ser aberto.
+    Done,
     Exited,
 }
 
@@ -35,6 +37,7 @@ impl Status {
             Status::Working => "trabalhando",
             Status::Waiting => "precisa de você",
             Status::Ready => "pronto",
+            Status::Done => "terminou",
             Status::Exited => "encerrado",
         }
     }
@@ -365,6 +368,23 @@ impl Chat {
     }
 
     /// Pid do agente em si (o do `~/.claude/sessions/<pid>.json`): no Claude, o filho do filtro.
+    /// Aplica um status lido do agente. "pronto" depois de "trabalhando", num chat fora de foco,
+    /// vira "terminou" e fica assim (as leituras seguintes também dizem "pronto") até o chat ser
+    /// aberto; o chat em foco você já está vendo terminar.
+    pub fn set_status(&mut self, status: Status, focused: bool) {
+        self.status = match (self.status, status) {
+            (Status::Working | Status::Done, Status::Ready) if !focused => Status::Done,
+            _ => status,
+        };
+    }
+
+    /// O chat foi aberto: o "terminou" já foi visto.
+    pub fn mark_seen(&mut self) {
+        if self.status == Status::Done {
+            self.status = Status::Ready;
+        }
+    }
+
     pub fn agent_pid(&self) -> Option<u32> {
         let pid = self.pid()?;
         if self.agent == Agent::Claude { crate::filter::inner_pid(pid) } else { Some(pid) }
@@ -382,6 +402,31 @@ pub fn screen_tail(text: &str, count: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminou_fora_de_foco_ate_ser_aberto() {
+        let mut chat = Chat::new(1, Agent::Claude, "/tmp".into(), None, None);
+        chat.set_status(Status::Ready, false);
+        assert_eq!(chat.status, Status::Ready, "sem trabalhar antes, só pronto");
+        chat.set_status(Status::Working, false);
+        chat.set_status(Status::Ready, false);
+        assert_eq!(chat.status, Status::Done);
+        // As leituras seguintes continuam dizendo "idle".
+        chat.set_status(Status::Ready, false);
+        assert_eq!(chat.status, Status::Done);
+        chat.mark_seen();
+        assert_eq!(chat.status, Status::Ready);
+        // Em foco, você vê terminar.
+        chat.set_status(Status::Working, true);
+        chat.set_status(Status::Ready, true);
+        assert_eq!(chat.status, Status::Ready);
+        // Pergunta depois de trabalhar continua "precisa de você".
+        chat.set_status(Status::Working, false);
+        chat.set_status(Status::Waiting, false);
+        assert_eq!(chat.status, Status::Waiting);
+        chat.set_status(Status::Working, false);
+        assert_eq!(chat.status, Status::Working);
+    }
 
     #[test]
     fn fim_da_tela_sem_linhas_vazias() {

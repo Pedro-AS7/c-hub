@@ -447,9 +447,9 @@ impl Ui {
         title.set_hexpand(true);
         let close = icon_button(ICON_CLOSE, close_tip(chat), &self.tx, move || Message::CloseChat(index));
         let first = row!(&label(&format!("{glyph} "), &[class]), &title, &close);
-        // Trabalhando / precisa de você ficam na cor do status; os outros, apagados.
+        // Trabalhando / precisa de você / terminou ficam na cor do status; os outros, apagados.
         let status_class = match chat.status {
-            Status::Working | Status::Waiting => class,
+            Status::Working | Status::Waiting | Status::Done => class,
             _ => "dim",
         };
         // No grupo do Omarchy, o "omarchy · " do rótulo seria repetido.
@@ -894,7 +894,8 @@ pub fn status_glyph(status: Status) -> (&'static str, &'static str) {
         Status::Starting => ("\u{f10c}", "dim"),
         Status::Working => ("\u{f110}", "accent"),
         Status::Waiting => ("\u{f0f3}", "warning"),
-        Status::Ready => ("\u{f111}", "success"),
+        Status::Ready => ("\u{f111}", "dim"),
+        Status::Done => ("\u{f058}", "success"),
         Status::Exited => (ICON_EXITED, "dim"),
     }
 }

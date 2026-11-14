@@ -65,7 +65,7 @@ impl Palette {
             dim: rgb(colors.muted),
             accent: rgb(colors.accent),
             danger: rgb(colors.ansi[1]),
-            success: rgb(colors.ansi[2]),
+            success: rgb(success_color(&colors)),
             warning: rgb(colors.ansi[3]),
             font_px,
             colors,
@@ -76,6 +76,46 @@ impl Palette {
     pub fn window(&self) -> Color {
         Color { a: self.alpha, ..self.background }
     }
+}
+
+/// Cor do "terminou": o verde do tema, a menos que ele se confunda com o amarelo ("precisa de
+/// você") ou o vermelho. No Starship o verde é laranja, quase o amarelo; aí vale a primeira cor
+/// do tema que se distinga das duas (e um pouco do acento, que marca o "trabalhando").
+fn success_color(colors: &ThemeColors) -> Rgb {
+    let [_, red, green, yellow, blue, _, cyan, ..] = colors.ansi;
+    let bright_green = colors.ansi[10];
+    let distinct = |color: Rgb| {
+        let Some(hue) = hue_of(color) else { return false };
+        let far = |other: Rgb, min: f32| hue_of(other).is_none_or(|other| hue_distance(hue, other) >= min);
+        far(yellow, 45.0) && far(red, 45.0) && far(colors.accent, 20.0)
+    };
+    [green, bright_green, cyan, blue].into_iter().find(|&color| distinct(color)).unwrap_or(green)
+}
+
+/// Matiz (0–360) de uma cor com saturação suficiente para a matiz contar; cinzas não têm.
+fn hue_of(color: Rgb) -> Option<f32> {
+    let [r, g, b] = [(color >> 16) & 0xff, (color >> 8) & 0xff, color & 0xff].map(|c| c as f32 / 255.0);
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let delta = max - min;
+    let lightness = (max + min) / 2.0;
+    let saturation = if delta == 0.0 { 0.0 } else { delta / (1.0 - (2.0 * lightness - 1.0).abs()) };
+    if saturation < 0.25 {
+        return None;
+    }
+    let hue = if max == r {
+        60.0 * ((g - b) / delta).rem_euclid(6.0)
+    } else if max == g {
+        60.0 * ((b - r) / delta + 2.0)
+    } else {
+        60.0 * ((r - g) / delta + 4.0)
+    };
+    Some(hue)
+}
+
+fn hue_distance(a: f32, b: f32) -> f32 {
+    let diff = (a - b).abs() % 360.0;
+    diff.min(360.0 - diff)
 }
 
 static CURRENT: RwLock<Option<Arc<Palette>>> = RwLock::new(None);
@@ -177,7 +217,23 @@ mod tests {
         assert_eq!(palette.accent, rgb(0x7aa2f7));
         assert_eq!(palette.window().a, 0.65);
         assert_eq!(palette.background.a, 1.0);
-        // O verde do tema (no Starship, laranja) marca o "pronto".
-        assert_eq!(palette.success, rgb(0xff9f0a));
+        // O verde do Starship é laranja, quase o amarelo do "precisa de você": o "terminou" fica
+        // no ciano do tema.
+        assert_eq!(palette.success, rgb(0xa6dcef));
+    }
+
+    #[test]
+    fn terminou_se_distingue_do_aviso_em_todos_os_temas() {
+        for builtin in &crate::palettes::BUILTINS {
+            let colors = &builtin.colors;
+            let success = success_color(colors);
+            let (Some(done), Some(warning)) = (hue_of(success), hue_of(colors.ansi[3])) else {
+                panic!("{}: sem matiz", builtin.id);
+            };
+            assert!(hue_distance(done, warning) >= 45.0, "{}: terminou parecido com o aviso", builtin.id);
+        }
+        // Onde o verde já é verde, ele fica.
+        let tokyo = &crate::palettes::find("tokyo-night").unwrap().colors;
+        assert_eq!(success_color(tokyo), tokyo.ansi[2]);
     }
 }

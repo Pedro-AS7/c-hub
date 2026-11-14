@@ -332,6 +332,7 @@ impl App {
                 if index < self.chats.len() {
                     self.focused = index;
                     self.focus = Some(Focus::Chat);
+                    self.chats[index].mark_seen();
                 }
             }
             Message::CloseChat(index) => self.close_chat(index),
@@ -777,6 +778,7 @@ impl App {
 
     fn apply_remote_poll(&mut self, host: &str, list: Vec<RemoteStatus>) {
         for polled in list {
+            let focused = self.chats.get(self.focused).map(|chat| chat.id);
             let Some(chat) = self.chats.iter_mut().find(|chat| {
                 chat.is_alive() && chat.host.as_deref() == Some(host) && chat.tmux.as_deref() == Some(polled.tmux.as_str())
             }) else {
@@ -790,7 +792,8 @@ impl App {
                 chat.session_id = Some(session_id);
             }
             if let Some(status) = polled.status.as_deref().and_then(Status::from_claude) {
-                chat.status = status;
+                let is_focused = focused == Some(chat.id);
+                chat.set_status(status, is_focused);
             }
             if polled.model.is_some() {
                 chat.active_model = polled.model;
@@ -1061,6 +1064,7 @@ impl App {
     }
 
     fn term_title(&mut self, id: TermId, title: &str) {
+        let focused = self.chats.get(self.focused).is_some_and(|chat| chat.id == id);
         let Some(chat) = self.chats.iter_mut().find(|chat| chat.id == id) else {
             return;
         };
@@ -1069,7 +1073,7 @@ impl App {
             // rápida do status.
             match claude::status_from_title(title) {
                 Some(Status::Working) => chat.status = Status::Working,
-                Some(status) if chat.status != Status::Waiting => chat.status = status,
+                Some(status) if chat.status != Status::Waiting => chat.set_status(status, focused),
                 Some(_) => {}
                 None if chat.status == Status::Starting => chat.status = Status::Ready,
                 None => {}
@@ -1147,6 +1151,7 @@ impl App {
     }
 
     fn apply_poll(&mut self, list: Vec<Polled>) {
+        let focused = self.chats.get(self.focused).map(|chat| chat.id);
         for chat in self.chats.iter_mut().filter(|chat| chat.is_alive()) {
             chat.read_mode();
         }
@@ -1170,12 +1175,12 @@ impl App {
                 }
                 chat.session_id = Some(running.session_id);
                 if let Some(status) = Status::from_claude(&running.status) {
-                    chat.status = status;
+                    chat.set_status(status, focused == Some(chat.id));
                 }
             }
             if let Some(snapshot) = polled.codex {
                 if let Some(status) = snapshot.status {
-                    chat.status = status;
+                    chat.set_status(status, focused == Some(chat.id));
                 } else if chat.status == Status::Starting {
                     chat.status = Status::Ready;
                 }

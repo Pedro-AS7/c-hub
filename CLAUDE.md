@@ -175,6 +175,9 @@ env -u ANTHROPIC_API_KEY claude (--session-id <uuid> | --resume <id> | --resume 
 - A cada 1 s (`Message::Poll`, em `spawn_blocking`), para cada chat vivo: `~/.claude/sessions/<pid>.json` →
   `sessionId` e `status` (`busy` → trabalhando, `waiting` → precisa de você, `idle` → pronto). O `sessionId` muda
   com `/clear` e é assim que um sub-chat descobre o id novo.
+- `waiting` cobre qualquer diálogo da TUI (`waitingFor`: `permission prompt`, `input needed`, `dialog open`…; visto no
+  binário da 2.1.325). `idle` depois de `busy` num chat fora de foco vira **terminou** (`Status::Done`,
+  `Chat::set_status`) até o chat ser aberto (`mark_seen`); no chat em foco fica "pronto".
 - Só do chat em foco: os últimos 512 KB do `.jsonl` da sessão → tokens de contexto e modelo da última resposta.
   O tamanho da janela não é gravado: vem de `claude -p --model <modelo> "/context"` (local, 0 tokens,
   `**Tokens:** 11.3k / 1m`), uma vez por modelo (`usage::context_window`, cache em `App::context_windows`).
@@ -333,7 +336,7 @@ como veio. Vale só para os chats do Claude (os do Codex e as abas de terminal n
   vai para `$XDG_CONFIG_HOME/chube/config.json` (`config.rs`); uma escolha que não existe nesta máquina volta ao padrão
   (`themes::resolve`). Com tema próprio, a conferência do tema do Omarchy não roda.
 - **Cores** do tema atual do Omarchy (`~/.local/state/omarchy/current/theme/colors.toml`, `omarchy.rs`): fundo, texto,
-  `muted` (apagado), acento, seleção e as ANSI (verde = "pronto", amarelo = aviso, vermelho = erro). No Starship do usuário o
+  `muted` (apagado), acento, seleção e as ANSI (verde = "terminou", amarelo = aviso, vermelho = erro). No Starship do usuário o
   acento é `#7aa2f7` (overlay em `~/.config/omarchy/themes/starship/`) e o "verde" é laranja.
 - **Tema ao vivo**: a cada 2 s (`Message::CheckTheme`, numa thread) compara `theme.generation` e as datas do
   `colors.toml`/`alacritty.toml`; mudou, `themes::reload`, `terminal::apply_theme` nos terminais e o CSS refeito.
@@ -346,7 +349,9 @@ como veio. Vale só para os chats do Claude (os do Codex e as abas de terminal n
   com fundo do texto a 8%, borda do texto a 25% e texto no acento; botões de texto com borda do texto a 40%; menu de modos
   com fundo opaco e borda no acento; dicas com borda do texto.
 - **Ícones Nerd Font** (constantes `ICON_*` em `ui.rs` e `panels.rs`). Status: `` trabalhando (acento), `` precisa
-  de você, `` pronto, `` iniciando, `` encerrado, `` em espera. Barras de uso em `ProgressBar` fina (cor do nível).
+  de você (amarelo), `` terminou (verde), `` pronto (apagado), `` iniciando, `` encerrado, `` em espera.
+  O "verde" é o ANSI verde do tema, a menos que a matiz fique a menos de 45° do amarelo ou do vermelho (no Starship o
+  verde é laranja): aí vale o verde claro, o ciano ou o azul do tema, o primeiro que se distinga (`themes::success_color`). Barras de uso em `ProgressBar` fina (cor do nível).
 - Sem barra de título nem botões de janela: o Hyprland move e fecha (Super+W).
 - **Painéis no lugar do chat** (`Panel`): "nova sessão" e "sessões" (abas `local` / hosts), páginas do mesmo `Stack` dos
   terminais; o cabeçalho do chat mostra o nome do painel e Esc volta.
