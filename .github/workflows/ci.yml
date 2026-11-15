@@ -15,7 +15,7 @@ jobs:
       - name: Dependências
         run: pacman -Syu --noconfirm --needed base-devel rust gtk4 vte4 tmux git
       - uses: actions/checkout@v5
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -42,7 +42,7 @@ jobs:
       - uses: gradle/actions/setup-gradle@v5
       - name: Testes e APK de depuração
         run: ./gradlew :app:testDebugUnitTest :app:assembleDebug
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         with:
           name: c-hub-android-debug
           path: android/app/build/outputs/apk/debug/app-debug.apk
