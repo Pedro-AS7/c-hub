@@ -44,6 +44,17 @@ Rascunho da interface: `chub_racunho.png` (na raiz).
 
 Projeto em português (Brasil). Comentários e UI em PT-BR; identificadores de código em inglês.
 
+## Versão Android: levar junto toda mudança aplicável (regra do usuário, 2026-11-15)
+
+Existe o **C-hub Android** em `~/projects/chub-android` (Kotlin + Compose; sem sessão local, entra por SSH nos tmux do
+notebook e da VPS). **Toda mudança feita aqui que fizer sentido no celular deve ser feita lá também, na mesma tarefa, sem
+o usuário pedir**: interface e comportamento da lista e dos chats, status, scripts e opções do tmux (os nomes, as opções e
+os scripts do `src/remote.rs` são os mesmos de `app/src/main/java/com/pedro/chub/ssh/Scripts.kt`), temas, atalhos de pasta,
+formato do `config.json`, nova sessão, sessões salvas. Não se aplica o que é só do desktop (VTE, filtro de cores, GTK,
+atalhos de teclado, integração com o Hyprland/Omarchy local). Na dúvida, aplique e diga o que ficou de fora e por quê.
+Depois: `./gradlew :app:testDebugUnitTest :app:assembleDebug` e `adb install -r app/build/outputs/apk/debug/app-debug.apk`
+se o celular estiver no adb (veja o `CLAUDE.md` de lá), e commit nos dois repositórios.
+
 ## Stack
 
 - **Rust** (edition 2024) + **GTK4** (`gtk4` 0.11, feature `v4_18`) + **VTE** para GTK4 (`vte4` 0.10, feature `v0_78`).
