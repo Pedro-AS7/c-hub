@@ -1,31 +1,18 @@
 //! Resolve o diretório digitado para uma sessão nova.
 //!
 //! Aceita `.` (pasta do chat em foco), `~`, caminhos absolutos ou relativos à pasta do chat
-//! em foco, e os atalhos do `fshort` (`~/.shortcuts`, linhas `nome=/caminho`), inclusive
+//! em foco, e os atalhos de pasta (`dir_shortcuts.rs`: os do C-hub e os do `fshort`), inclusive
 //! com subpastas: `mvp/src` vira `<atalho mvp>/src`.
 
 use std::path::{Path, PathBuf};
 
 use crate::claude::home_dir;
 
-/// Os atalhos do `fshort`, na ordem do arquivo.
-pub fn shortcuts() -> Vec<(String, PathBuf)> {
-    let file = std::env::var_os("SHORTCUTS_FILE")
-        .map_or_else(|| home_dir().join(".shortcuts"), PathBuf::from);
-    let Ok(text) = std::fs::read_to_string(file) else {
-        return Vec::new();
-    };
-    text.lines()
-        .filter_map(|line| line.split_once('='))
-        .map(|(name, path)| (name.to_owned(), PathBuf::from(path)))
-        .collect()
-}
-
 /// Converte o texto digitado num diretório existente.
 pub fn resolve(input: &str, focused_dir: &Path) -> Result<PathBuf, String> {
     let input = input.trim();
     if input.is_empty() {
-        return Err("Digite um diretório, um atalho do fshort ou \".\"".into());
+        return Err("Digite uma pasta, um atalho ou \".\"".into());
     }
 
     let path = if input == "~" {
@@ -54,7 +41,7 @@ pub fn resolve(input: &str, focused_dir: &Path) -> Result<PathBuf, String> {
 /// pastas de mesmo nome dentro da pasta do chat em foco, como no `go` do terminal.
 fn from_shortcut(input: &str) -> Option<PathBuf> {
     let (name, rest) = input.split_once('/').unwrap_or((input, ""));
-    let (_, base) = shortcuts().into_iter().find(|(shortcut, _)| shortcut == name)?;
+    let base = crate::dir_shortcuts::find(name)?;
     Some(if rest.is_empty() { base } else { base.join(rest) })
 }
 

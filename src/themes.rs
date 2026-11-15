@@ -1,5 +1,6 @@
 //! Cores do Chube: as do tema atual do Omarchy (`omarchy.rs`, com o vidro, relidas quando o tema
-//! muda) ou as de um tema próprio (`palettes.rs`, opacos, para qualquer distro).
+//! muda), as de um tema próprio (`palettes.rs`, opacos, para qualquer distro) ou as do tema
+//! personalizado (`palettes::CUSTOM`, gravado no `config.json`).
 //!
 //! A paleta fica num `static` para ser lida de qualquer parte da interface (CSS e terminais).
 //! Os tokens seguem o `shell.toml` do Omarchy (menus, controles e popups do shell): linhas
@@ -119,8 +120,10 @@ fn hue_distance(a: f32, b: f32) -> f32 {
 }
 
 static CURRENT: RwLock<Option<Arc<Palette>>> = RwLock::new(None);
-/// Tema escolhido: `OMARCHY` ou o id de um tema próprio.
+/// Tema escolhido: `OMARCHY`, o id de um tema próprio ou `palettes::CUSTOM`.
 static CHOICE: RwLock<Option<String>> = RwLock::new(None);
+/// Tema personalizado: `None` antes de ler o `config.json`; `Some(None)` se não há um.
+static CUSTOM_COLORS: RwLock<Option<Option<ThemeColors>>> = RwLock::new(None);
 
 /// Seguir o tema do Omarchy (só oferecido onde ele existe).
 pub const OMARCHY: &str = "omarchy";
@@ -132,7 +135,27 @@ pub fn available() -> Vec<(&'static str, &'static str)> {
         list.push((OMARCHY, "seguir o Omarchy"));
     }
     list.extend(crate::palettes::BUILTINS.iter().map(|builtin| (builtin.id, builtin.name)));
+    list.push((crate::palettes::CUSTOM, "personalizado"));
     list
+}
+
+/// O tema personalizado gravado, se houver.
+pub fn custom() -> Option<ThemeColors> {
+    if let Some(custom) = CUSTOM_COLORS.read().ok().and_then(|custom| custom.clone()) {
+        return custom;
+    }
+    let custom = crate::config::get("custom_theme").and_then(|value| crate::palettes::from_json(&value));
+    if let Ok(mut current) = CUSTOM_COLORS.write() {
+        *current = Some(custom.clone());
+    }
+    custom
+}
+
+/// Troca o tema personalizado (o chamador o grava e relê a paleta).
+pub fn set_custom(colors: ThemeColors) {
+    if let Ok(mut current) = CUSTOM_COLORS.write() {
+        *current = Some(Some(colors));
+    }
 }
 
 /// Tema em uso: o gravado, se ainda existir aqui; senão o do Omarchy, onde houver, ou o padrão.
@@ -140,7 +163,7 @@ pub fn choice() -> String {
     if let Some(choice) = CHOICE.read().ok().and_then(|choice| choice.clone()) {
         return choice;
     }
-    let choice = resolve(crate::config::theme().as_deref(), crate::omarchy::installed());
+    let choice = resolve(crate::config::theme().as_deref(), crate::omarchy::installed(), custom().is_some());
     if let Ok(mut current) = CHOICE.write() {
         *current = Some(choice.clone());
     }
@@ -155,10 +178,11 @@ pub fn set_choice(id: &str) {
 }
 
 /// Escolha válida a partir da gravada: um tema que não existe mais, ou "seguir o Omarchy" numa
-/// máquina sem ele, volta ao padrão.
-fn resolve(saved: Option<&str>, omarchy: bool) -> String {
+/// máquina sem ele, ou o personalizado sem um gravado, volta ao padrão.
+fn resolve(saved: Option<&str>, omarchy: bool, custom: bool) -> String {
     match saved {
         Some(OMARCHY) if omarchy => OMARCHY.to_owned(),
+        Some(crate::palettes::CUSTOM) if custom => crate::palettes::CUSTOM.to_owned(),
         Some(id) if crate::palettes::find(id).is_some() => id.to_owned(),
         _ if omarchy => OMARCHY.to_owned(),
         _ => crate::palettes::DEFAULT.to_owned(),
@@ -168,6 +192,11 @@ fn resolve(saved: Option<&str>, omarchy: bool) -> String {
 /// Cores do tema escolhido.
 fn colors() -> ThemeColors {
     let choice = choice();
+    if choice == crate::palettes::CUSTOM
+        && let Some(custom) = custom()
+    {
+        return custom;
+    }
     match crate::palettes::find(&choice) {
         Some(builtin) => builtin.colors.clone(),
         None => ThemeColors::load(),
@@ -201,13 +230,18 @@ mod tests {
 
     #[test]
     fn escolha_valida() {
-        assert_eq!(resolve(None, true), OMARCHY);
-        assert_eq!(resolve(None, false), crate::palettes::DEFAULT);
-        assert_eq!(resolve(Some("nord"), true), "nord");
+        use crate::palettes::{CUSTOM, DEFAULT};
+        assert_eq!(resolve(None, true, false), OMARCHY);
+        assert_eq!(resolve(None, false, false), DEFAULT);
+        assert_eq!(resolve(Some("nord"), true, false), "nord");
         // Configuração copiada de uma máquina com Omarchy para uma sem ele.
-        assert_eq!(resolve(Some(OMARCHY), false), crate::palettes::DEFAULT);
-        assert_eq!(resolve(Some("tema-removido"), false), crate::palettes::DEFAULT);
-        assert_eq!(resolve(Some("tema-removido"), true), OMARCHY);
+        assert_eq!(resolve(Some(OMARCHY), false, false), DEFAULT);
+        assert_eq!(resolve(Some("tema-removido"), false, false), DEFAULT);
+        assert_eq!(resolve(Some("tema-removido"), true, false), OMARCHY);
+        // O personalizado só vale se estiver gravado.
+        assert_eq!(resolve(Some(CUSTOM), true, true), CUSTOM);
+        assert_eq!(resolve(Some(CUSTOM), true, false), OMARCHY);
+        assert_eq!(resolve(Some(CUSTOM), false, false), DEFAULT);
     }
 
     #[test]

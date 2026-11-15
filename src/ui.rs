@@ -20,6 +20,7 @@ use crate::claude::Mode;
 use crate::usage::{self, Window};
 use crate::groups::Category;
 use crate::panels::{NewChatPanel, SessionsPanel};
+use crate::theme_panel::ThemePanel;
 use crate::shortcuts;
 use crate::themes;
 
@@ -85,6 +86,7 @@ pub struct Ui {
     refresh: gtk4::Button,
     new_chat: NewChatPanel,
     sessions: SessionsPanel,
+    theme_panel: ThemePanel,
     close_chat: gtk4::Button,
     show_terminal: gtk4::Button,
     notice: gtk4::Label,
@@ -232,6 +234,8 @@ impl Ui {
         let sessions_panel = SessionsPanel::new(app, &tx);
         chat_stack.add_named(&new_chat_panel.root, Some("nova"));
         chat_stack.add_named(&sessions_panel.root, Some("sessoes"));
+        let theme_panel = ThemePanel::new(&tx);
+        chat_stack.add_named(&theme_panel.root, Some("tema"));
 
         // Atalhos na fase de captura: chegam antes do terminal em foco e não vão para o PTY.
         let keys = gtk4::EventControllerKey::new();
@@ -261,13 +265,13 @@ impl Ui {
             // Esc fecha o painel aberto. Ouvir só no painel não basta: aberto por um botão, o foco
             // fica no botão ou no terminal do chat escondido atrás dele. No terminal integrado da
             // direita, o Esc continua indo para o shell.
+            // Num balão (salvar atalho, lista de atalhos), o Esc fecha só o balão.
             if keyval == gdk::Key::Escape && open.get() {
-                let in_terminal = controller
-                    .widget()
-                    .and_then(|window| window.root())
-                    .and_then(|root| root.focus())
-                    .is_some_and(|focus| focus.is_ancestor(&terminal_side));
-                if !in_terminal {
+                let focus = controller.widget().and_then(|window| window.root()).and_then(|root| root.focus());
+                let in_terminal = focus.as_ref().is_some_and(|focus| focus.is_ancestor(&terminal_side));
+                let in_popover =
+                    focus.as_ref().is_some_and(|focus| focus.ancestor(gtk4::Popover::static_type()).is_some());
+                if !in_terminal && !in_popover {
                     let _ = sender.try_send(Message::ClosePanel);
                     return glib::Propagation::Stop;
                 }
@@ -304,6 +308,7 @@ impl Ui {
             refresh,
             new_chat: new_chat_panel,
             sessions: sessions_panel,
+            theme_panel,
             close_chat,
             show_terminal,
             notice,
@@ -487,12 +492,14 @@ impl Ui {
         match app.panel {
             Panel::NewChat => self.new_chat.sync(app),
             Panel::Sessions => self.sessions.sync(app, &self.tx),
+            Panel::Theme => self.theme_panel.sync(),
             Panel::None => {}
         }
         let chat = app.chats.get(app.focused);
         let page = match app.panel {
             Panel::NewChat => "nova".to_owned(),
             Panel::Sessions => "sessoes".to_owned(),
+            Panel::Theme => "tema".to_owned(),
             Panel::None => chat.filter(|chat| chat.terminal.is_some()).map_or_else(|| "vazio".to_owned(), |chat| page_name(chat.id)),
         };
         self.chat_stack.set_visible_child_name(&page);
@@ -500,6 +507,7 @@ impl Ui {
         let panel_title = match app.panel {
             Panel::NewChat => Some((ICON_NEW, "nova sessão")),
             Panel::Sessions => Some((ICON_HISTORY, "sessões")),
+            Panel::Theme => Some((ICON_THEME, "tema")),
             Panel::None => None,
         };
         if let Some((icon, title)) = panel_title {
@@ -762,7 +770,8 @@ impl Meter {
     }
 }
 
-/// Botão de paleta com o menu dos temas: os próprios e, onde houver Omarchy, "seguir o Omarchy".
+/// Botão de paleta com o menu dos temas: os próprios, o personalizado, onde houver Omarchy
+/// "seguir o Omarchy", e "personalizar…", que abre o painel do tema.
 fn theme_selector(tx: &Sender<Message>) -> (gtk4::MenuButton, Vec<(&'static str, gtk4::Button)>) {
     let menu = gtk4::Box::new(gtk4::Orientation::Vertical, 2);
     let popover = gtk4::Popover::new();
@@ -782,6 +791,21 @@ fn theme_selector(tx: &Sender<Message>) -> (gtk4::MenuButton, Vec<(&'static str,
         menu.append(&item);
         items.push((id, item));
     }
+    let customize = gtk4::Button::new();
+    customize.set_child(Some(&label("personalizar…", &["dim"])));
+    customize.add_css_class("choice");
+    customize.set_tooltip_text(Some("Mudar as cores do tema"));
+    let sender = tx.clone();
+    let parent = popover.clone();
+    customize.connect_clicked(move |_| {
+        parent.popdown();
+        let _ = sender.try_send(Message::ShowThemePanel);
+    });
+    let separator = gtk4::Separator::new(gtk4::Orientation::Horizontal);
+    separator.set_margin_top(2);
+    separator.set_margin_bottom(2);
+    menu.append(&separator);
+    menu.append(&customize);
     popover.set_child(Some(&menu));
     // Com `label`, o GTK põe uma seta ao lado; como filho, fica só o ícone, como os outros botões.
     let button = gtk4::MenuButton::builder().popover(&popover).child(&gtk4::Label::new(Some(ICON_THEME))).build();
@@ -909,7 +933,7 @@ fn shortcuts_menu() -> gtk4::MenuButton {
         key.set_width_chars(14);
         list.append(&row!(&key, &label(shortcut.label(), &[])));
     }
-    list.append(&label("Esc fecha o painel aberto (nova sessão, sessões)", &["dim"]));
+    list.append(&label("Esc fecha o painel aberto (nova sessão, sessões, tema)", &["dim"]));
     let popover = gtk4::Popover::new();
     popover.set_has_arrow(false);
     popover.add_css_class("menu-card");
@@ -959,7 +983,7 @@ fn section_header(content: &gtk4::Box) -> gtk4::Box {
 }
 
 /// Botão de ícone (Nerd Font), apagado até passar o mouse.
-fn icon_button(icon: &str, help: &str, tx: &Sender<Message>, message: impl Fn() -> Message + 'static) -> gtk4::Button {
+pub fn icon_button(icon: &str, help: &str, tx: &Sender<Message>, message: impl Fn() -> Message + 'static) -> gtk4::Button {
     let button = gtk4::Button::with_label(icon);
     button.add_css_class("icon");
     button.set_tooltip_text(Some(help));
@@ -1069,6 +1093,16 @@ menubutton.mode > button {{ background: none; border: none; box-shadow: none; pa
 menubutton.mode > button:hover {{ background: {hover}; }}
 popover.menu-card > contents {{ background: {menu_bg}; border: 1px solid {accent}; padding: 4px; box-shadow: none; }}
 .section-header button {{ margin-left: 2px; }}
+menubutton.text > button {{ background: {button}; border: 1px solid {button_border}; box-shadow: none; padding: 2px 10px; min-height: 0; color: {fg}; }}
+menubutton.text > button:hover {{ background: {hover}; }}
+entry.error {{ border-color: {danger}; }}
+colorbutton > button {{ background: none; border: 1px solid {button_border}; box-shadow: none; padding: 2px; min-height: 0; min-width: 0; }}
+colorbutton > button:hover {{ border-color: {accent}; }}
+colorbutton colorswatch {{ min-width: 36px; min-height: 14px; }}
+scale trough {{ min-height: 3px; background: {selection}; border: none; box-shadow: none; }}
+scale highlight {{ background: {accent}; border: none; }}
+scale slider {{ min-width: 12px; min-height: 12px; margin: -5px; background: {accent}; border: none; box-shadow: none; }}
+popover.menu-card separator {{ background: {line}; min-height: 1px; }}
 ",
         window = palette.window().css(),
         fg = palette.text.css(),

@@ -19,9 +19,11 @@ use crate::chat::{Chat, ModeChange, Status, TMUX_ID_PREFIX, TermId};
 use crate::claude::{self, Mode, Start};
 use crate::cli::{self, Flags};
 use crate::codex;
+use crate::dir_shortcuts::{self, DirShortcut};
 use crate::dirs;
 use crate::groups::{self, Category, CategoryGroup};
-use crate::omarchy;
+use crate::omarchy::{self, Rgb, ThemeColors};
+use crate::palettes::{self, ColorField};
 use crate::remote::{self, Listing, RemoteStatus, TmuxSession};
 use crate::restore::{self, OpenChat, OpenChats};
 use crate::sessions::{self, Running, SavedSession, Stats};
@@ -63,6 +65,8 @@ pub enum Panel {
     None,
     NewChat,
     Sessions,
+    /// Escolha e personalização do tema.
+    Theme,
 }
 
 /// Sessões de uma VPS, buscadas por SSH.
@@ -127,6 +131,26 @@ pub enum Message {
     ShowSection(Section),
     /// Troca o tema (id de `themes::available`) e grava a escolha.
     SetTheme(String),
+    /// Abre o painel do tema.
+    ShowThemePanel,
+    /// Muda uma cor do tema; o tema em uso vira o personalizado.
+    SetThemeColor(ColorField, Rgb),
+    /// Muda a opacidade do fundo (0–1); o tema em uso vira o personalizado.
+    SetThemeOpacity(f32),
+    /// O balão "salvar atalho" abriu: sugere o nome pela pasta.
+    ShortcutSaveOpened,
+    ShortcutNameInput(String),
+    /// Grava o atalho com o nome digitado para a pasta do campo da nova sessão.
+    SaveShortcut,
+    /// Põe um atalho da lista em edição (`None` sai da edição).
+    EditShortcut(Option<String>),
+    /// Grava a edição: nome antigo, nome novo e pasta.
+    UpdateShortcut(String, String, String),
+    /// Pede a confirmação para excluir um atalho (`None` desiste).
+    AskDeleteShortcut(Option<String>),
+    DeleteShortcut(String),
+    /// Põe o atalho no campo de pasta da nova sessão.
+    UseShortcut(String),
     /// Confere se o tema do Omarchy mudou.
     CheckTheme,
     ThemeChecked(String),
@@ -226,6 +250,19 @@ pub struct App {
     pub theme_changed: bool,
     /// Aviso mostrado abaixo do cabeçalho do chat.
     pub notice: Option<String>,
+    /// Atalhos de pasta (os do C-hub e os do fshort), relidos a cada mudança.
+    pub dir_shortcuts: Vec<DirShortcut>,
+    /// Muda a cada mudança nos atalhos ou na edição deles: a interface refaz a lista.
+    pub shortcuts_version: u64,
+    /// Nome digitado no balão "salvar atalho".
+    pub shortcut_name: String,
+    /// O nome mudou por fora (balão aberto): a interface o copia para o campo.
+    pub shortcut_name_reset: bool,
+    /// Atalho em edição na lista e o que espera confirmação para ser excluído.
+    pub shortcut_editing: Option<String>,
+    pub shortcut_deleting: Option<String>,
+    /// Erro da última edição de atalho, mostrado no topo da lista.
+    pub shortcut_error: Option<String>,
     /// Última lista de chats gravada (`restore`), para só gravar quando mudar.
     open_chats: OpenChats,
     pub focus: Option<Focus>,
@@ -288,6 +325,13 @@ impl App {
             checking_theme: false,
             theme_changed: false,
             notice: None,
+            dir_shortcuts: dir_shortcuts::all(),
+            shortcuts_version: 0,
+            shortcut_name: String::new(),
+            shortcut_name_reset: false,
+            shortcut_editing: None,
+            shortcut_deleting: None,
+            shortcut_error: None,
             open_chats: OpenChats::default(),
             focus: Some(Focus::Chat),
             limits: Vec::new(),
@@ -565,11 +609,96 @@ impl App {
                 Section::Terminal => self.terminal_visible = true,
             },
             Message::SetTheme(id) => {
+                // "personalizado" sem um gravado: nasce das cores do tema em uso.
+                if id == palettes::CUSTOM && themes::custom().is_none() {
+                    self.save_custom_theme(themes::current().colors.clone());
+                    return Task::none();
+                }
                 if let Err(error) = crate::config::set_theme(&id) {
                     self.notice = Some(format!("não consegui gravar o tema: {error}"));
                 }
                 themes::set_choice(&id);
                 self.apply_theme();
+            }
+            Message::ShowThemePanel => {
+                self.panel = Panel::Theme;
+                self.chat_visible = true;
+            }
+            Message::SetThemeColor(field, value) => {
+                let mut colors = themes::current().colors.clone();
+                if field.get(&colors) != value {
+                    field.set(&mut colors, value);
+                    self.save_custom_theme(colors);
+                }
+            }
+            Message::SetThemeOpacity(opacity) => {
+                let mut colors = themes::current().colors.clone();
+                let opacity = opacity.clamp(palettes::MIN_OPACITY, 1.0);
+                if (colors.opacity - opacity).abs() > 0.001 {
+                    colors.opacity = opacity;
+                    self.save_custom_theme(colors);
+                }
+            }
+            Message::ShortcutSaveOpened => {
+                self.shortcut_name = self.new_chat_dir().map(|dir| dir_shortcuts::suggest_name(&dir)).unwrap_or_default();
+                self.shortcut_name_reset = true;
+            }
+            Message::ShortcutNameInput(text) => self.shortcut_name = text,
+            Message::SaveShortcut => {
+                if let Ok((name, _)) = self.shortcut_save_check()
+                    && let Ok(dir) = self.new_chat_dir()
+                {
+                    let mut own = dir_shortcuts::own();
+                    match dir_shortcuts::upsert(&mut own, None, &name, dir) {
+                        Ok(()) => {
+                            self.store_shortcuts(&own);
+                            // O campo passa a mostrar o atalho, que leva à mesma pasta.
+                            self.new_chat_input = name;
+                            self.new_chat_input_reset = true;
+                        }
+                        Err(error) => self.notice = Some(error),
+                    }
+                }
+                self.focus = Some(Focus::NewChatInput);
+            }
+            Message::EditShortcut(name) => {
+                self.shortcut_editing = name;
+                self.shortcut_deleting = None;
+                self.shortcut_error = None;
+                self.shortcuts_version += 1;
+            }
+            Message::UpdateShortcut(old, name, path) => {
+                let result = dir_shortcuts::expand(&path).and_then(|path| {
+                    let mut own = dir_shortcuts::own();
+                    dir_shortcuts::upsert(&mut own, Some(&old), &name, path).map(|()| own)
+                });
+                match result {
+                    Ok(own) => {
+                        self.shortcut_editing = None;
+                        self.store_shortcuts(&own);
+                    }
+                    Err(error) => {
+                        self.shortcut_error = Some(error);
+                        self.shortcuts_version += 1;
+                    }
+                }
+            }
+            Message::AskDeleteShortcut(name) => {
+                self.shortcut_deleting = name;
+                self.shortcut_editing = None;
+                self.shortcut_error = None;
+                self.shortcuts_version += 1;
+            }
+            Message::DeleteShortcut(name) => {
+                let mut own = dir_shortcuts::own();
+                dir_shortcuts::remove(&mut own, &name);
+                self.shortcut_deleting = None;
+                self.store_shortcuts(&own);
+            }
+            Message::UseShortcut(name) => {
+                self.new_chat_input = name;
+                self.new_chat_input_reset = true;
+                self.focus = Some(Focus::NewChatInput);
             }
             // Com um tema próprio, o do Omarchy não importa.
             Message::CheckTheme if themes::choice() != themes::OMARCHY => {}
@@ -1247,6 +1376,49 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Grava e aplica o tema personalizado, que passa a ser o escolhido.
+    fn save_custom_theme(&mut self, colors: ThemeColors) {
+        let saved = crate::config::set("custom_theme", palettes::to_json(&colors))
+            .and_then(|()| crate::config::set_theme(palettes::CUSTOM));
+        if let Err(error) = saved {
+            self.notice = Some(format!("não consegui gravar o tema: {error}"));
+        }
+        themes::set_custom(colors);
+        themes::set_choice(palettes::CUSTOM);
+        self.apply_theme();
+    }
+
+    /// Grava os atalhos do C-hub e relê a lista (com os do fshort).
+    fn store_shortcuts(&mut self, own: &[(String, PathBuf)]) {
+        match dir_shortcuts::save(own) {
+            Ok(()) => self.shortcut_error = None,
+            Err(error) => self.shortcut_error = Some(format!("não consegui gravar os atalhos: {error}")),
+        }
+        self.dir_shortcuts = dir_shortcuts::all();
+        self.shortcuts_version += 1;
+    }
+
+    /// O que o balão "salvar atalho" vai gravar: o nome conferido e um aviso (o nome já existe,
+    /// a pasta já tem atalho), ou o erro que impede de salvar.
+    pub fn shortcut_save_check(&self) -> Result<(String, Option<String>), String> {
+        let name = dir_shortcuts::check_name(&self.shortcut_name)?;
+        let dir = self.new_chat_dir()?;
+        let existing = self.dir_shortcuts.iter().find(|shortcut| shortcut.name == name);
+        let note = match existing {
+            Some(shortcut) if shortcut.path == dir => Some("já é este o atalho".to_owned()),
+            Some(shortcut) if shortcut.fshort => {
+                Some(format!("passa na frente do atalho do fshort (→ {})", claude::display_path(&shortcut.path)))
+            }
+            Some(shortcut) => Some(format!("já existe (→ {}): salvar troca a pasta", claude::display_path(&shortcut.path))),
+            None => self
+                .dir_shortcuts
+                .iter()
+                .find(|shortcut| shortcut.path == dir)
+                .map(|shortcut| format!("esta pasta já tem o atalho \"{}\"", shortcut.name)),
+        };
+        Ok((name, note))
     }
 
     /// Relê o tema e o aplica nos terminais abertos; o CSS fica com a interface.

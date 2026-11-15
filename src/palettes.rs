@@ -1,8 +1,131 @@
 //! Temas próprios do C-hub, para qualquer distro: opacos (sem o vidro do Omarchy) e com as
 //! cores oficiais de cada esquema. O seletor fica no cabeçalho "# chats" e a escolha vai para
 //! `config.rs`.
+//!
+//! O tema personalizado (`CUSTOM`) parte das cores do tema em uso e muda os campos de
+//! `ColorField` e a opacidade; fica gravado em `config.json` (`custom_theme`).
 
-use crate::omarchy::ThemeColors;
+use serde_json::{Value, json};
+
+use crate::omarchy::{Rgb, ThemeColors};
+
+/// Id do tema personalizado.
+pub const CUSTOM: &str = "personalizado";
+
+/// Uma cor do tema que o painel "tema" deixa mudar.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ColorField {
+    Accent,
+    Background,
+    Foreground,
+    Muted,
+    Selection,
+    /// Uma das 16 cores do terminal (0–7 normais, 8–15 claras).
+    Ansi(usize),
+}
+
+impl ColorField {
+    /// As cores da interface, com o nome e onde aparecem, na ordem do painel.
+    pub const INTERFACE: [(ColorField, &'static str, &'static str); 5] = [
+        (ColorField::Accent, "destaque", "títulos, item escolhido, \"trabalhando\""),
+        (ColorField::Background, "fundo", "fundo da janela e dos menus"),
+        (ColorField::Foreground, "texto", "texto e cursor do terminal"),
+        (ColorField::Muted, "apagado", "detalhes, ícones e bordas"),
+        (ColorField::Selection, "seleção", "seleção no terminal e barras de uso"),
+    ];
+
+    /// Nomes das 8 cores do terminal; as claras usam o mesmo nome.
+    pub const ANSI_NAMES: [&'static str; 8] = ["preto", "vermelho", "verde", "amarelo", "azul", "magenta", "ciano", "branco"];
+
+    pub fn get(self, colors: &ThemeColors) -> Rgb {
+        match self {
+            ColorField::Accent => colors.accent,
+            ColorField::Background => colors.background,
+            ColorField::Foreground => colors.foreground,
+            ColorField::Muted => colors.muted,
+            ColorField::Selection => colors.selection,
+            ColorField::Ansi(index) => colors.ansi[index % 16],
+        }
+    }
+
+    pub fn set(self, colors: &mut ThemeColors, value: Rgb) {
+        let value = value & 0xff_ffff;
+        match self {
+            ColorField::Accent => colors.accent = value,
+            ColorField::Background => {
+                colors.background = value;
+                colors.light = luminance(value) > 0.5;
+            }
+            ColorField::Foreground => colors.foreground = value,
+            ColorField::Muted => colors.muted = value,
+            ColorField::Selection => colors.selection = value,
+            ColorField::Ansi(index) => colors.ansi[index % 16] = value,
+        }
+    }
+}
+
+/// `#rrggbb`.
+pub fn hex(color: Rgb) -> String {
+    format!("#{:06x}", color & 0xff_ffff)
+}
+
+/// Opacidade mínima do tema personalizado: abaixo disso o texto some sobre o que está atrás.
+pub const MIN_OPACITY: f32 = 0.3;
+
+/// Tema personalizado para o `config.json`.
+pub fn to_json(colors: &ThemeColors) -> Value {
+    json!({
+        "accent": hex(colors.accent),
+        "selection": hex(colors.selection),
+        "muted": hex(colors.muted),
+        "background": hex(colors.background),
+        "lighter_background": hex(colors.lighter_background),
+        "foreground": hex(colors.foreground),
+        "bright_foreground": hex(colors.bright_foreground),
+        "ansi": colors.ansi.iter().map(|&color| hex(color)).collect::<Vec<_>>(),
+        "opacity": colors.opacity,
+    })
+}
+
+/// Tema personalizado lido do `config.json`; o que faltar ou estiver estragado fica com o padrão.
+pub fn from_json(value: &Value) -> Option<ThemeColors> {
+    value.as_object()?;
+    let mut colors = find(DEFAULT).map(|builtin| builtin.colors.clone()).unwrap_or_default();
+    let color = |key: &str| value.get(key).and_then(Value::as_str).and_then(crate::omarchy::parse_hex);
+    let set = |target: &mut Rgb, key: &str| {
+        if let Some(value) = color(key) {
+            *target = value;
+        }
+    };
+    set(&mut colors.accent, "accent");
+    set(&mut colors.selection, "selection");
+    set(&mut colors.muted, "muted");
+    set(&mut colors.background, "background");
+    set(&mut colors.lighter_background, "lighter_background");
+    set(&mut colors.foreground, "foreground");
+    set(&mut colors.bright_foreground, "bright_foreground");
+    if let Some(ansi) = value.get("ansi").and_then(Value::as_array) {
+        for (target, item) in colors.ansi.iter_mut().zip(ansi) {
+            if let Some(value) = item.as_str().and_then(crate::omarchy::parse_hex) {
+                *target = value;
+            }
+        }
+    }
+    if let Some(opacity) = value.get("opacity").and_then(Value::as_f64) {
+        colors.opacity = (opacity as f32).clamp(MIN_OPACITY, 1.0);
+    }
+    colors.light = luminance(colors.background) > 0.5;
+    Some(colors)
+}
+
+/// Luminância relativa (WCAG) de `0xRRGGBB`.
+pub fn luminance(hex: Rgb) -> f64 {
+    let channel = |shift: u32| {
+        let value = f64::from((hex >> shift) & 0xff) / 255.0;
+        if value <= 0.03928 { value / 12.92 } else { ((value + 0.055) / 1.055).powf(2.4) }
+    };
+    0.2126 * channel(16) + 0.7152 * channel(8) + 0.0722 * channel(0)
+}
 
 /// Um tema embutido: id gravado na configuração, nome no seletor e cores.
 pub struct Builtin {
@@ -143,15 +266,6 @@ pub fn find(id: &str) -> Option<&'static Builtin> {
 mod tests {
     use super::*;
 
-    /// Luminância relativa (WCAG) de `0xRRGGBB`.
-    fn luminance(hex: u32) -> f64 {
-        let channel = |shift: u32| {
-            let value = f64::from((hex >> shift) & 0xff) / 255.0;
-            if value <= 0.03928 { value / 12.92 } else { ((value + 0.055) / 1.055).powf(2.4) }
-        };
-        0.2126 * channel(16) + 0.7152 * channel(8) + 0.0722 * channel(0)
-    }
-
     fn contrast(a: u32, b: u32) -> f64 {
         let (high, low) = if luminance(a) > luminance(b) { (luminance(a), luminance(b)) } else { (luminance(b), luminance(a)) };
         (high + 0.05) / (low + 0.05)
@@ -176,5 +290,31 @@ mod tests {
         for (index, builtin) in BUILTINS.iter().enumerate() {
             assert!(BUILTINS[index + 1..].iter().all(|other| other.id != builtin.id));
         }
+    }
+
+    #[test]
+    fn personalizado_ida_e_volta() {
+        let mut colors = find("nord").unwrap().colors.clone();
+        ColorField::Accent.set(&mut colors, 0x123456);
+        ColorField::Ansi(9).set(&mut colors, 0xabcdef);
+        colors.opacity = 0.8;
+        assert_eq!(from_json(&to_json(&colors)), Some(colors.clone()));
+        assert_eq!(ColorField::Accent.get(&colors), 0x123456);
+        assert_eq!(hex(0x0a0b0c), "#0a0b0c");
+        // Fundo claro vira tema claro.
+        ColorField::Background.set(&mut colors, 0xfafafa);
+        assert!(colors.light);
+    }
+
+    #[test]
+    fn personalizado_estragado_usa_o_padrao_no_que_falta() {
+        let default = &find(DEFAULT).unwrap().colors;
+        let colors = from_json(&json!({"accent": "#ff0000", "muted": "azul", "ansi": ["#000001"], "opacity": 0.01})).unwrap();
+        assert_eq!(colors.accent, 0xff0000);
+        assert_eq!(colors.muted, default.muted);
+        assert_eq!(colors.ansi[0], 0x000001);
+        assert_eq!(colors.ansi[1], default.ansi[1]);
+        assert_eq!(colors.opacity, MIN_OPACITY);
+        assert_eq!(from_json(&json!("não é objeto")), None);
     }
 }

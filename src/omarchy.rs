@@ -126,7 +126,7 @@ impl ThemeColors {
 }
 
 /// `#rrggbb` (com ou sem `#`).
-fn parse_hex(value: &str) -> Option<Rgb> {
+pub fn parse_hex(value: &str) -> Option<Rgb> {
     let hex = value.trim().trim_start_matches('#');
     (hex.len() == 6).then(|| u32::from_str_radix(hex, 16).ok()).flatten()
 }

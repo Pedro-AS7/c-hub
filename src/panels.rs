@@ -9,16 +9,17 @@ use std::path::PathBuf;
 
 use async_channel::Sender;
 use gtk4::prelude::*;
-use gtk4::{gio, pango};
+use gtk4::{gio, glib, pango};
 
 use crate::app::{App, Launch, Message, RemoteState};
 use crate::chat::Status;
 use crate::claude;
-use crate::dirs;
+use crate::dir_shortcuts::DirShortcut;
 use crate::remote;
 use crate::sessions::{self, SavedSession};
 use crate::ui::{
-    ICON_LAPTOP, ICON_OMARCHY, ICON_SERVER, button_message, choice, clickable_row, label, row, status_glyph, text_button,
+    ICON_LAPTOP, ICON_OMARCHY, ICON_SERVER, button_message, choice, clickable_row, icon_button, label, row, status_glyph,
+    text_button,
 };
 
 const ICON_RIGHT: &str = "\u{f0da}";
@@ -27,6 +28,9 @@ const ICON_REFRESH: &str = "\u{f0450}";
 const ICON_WARNING: &str = "\u{f071}";
 const ICON_TMUX: &str = "\u{ebc8}";
 const ICON_IDLE: &str = "\u{f444}";
+const ICON_EDIT: &str = "\u{f03eb}";
+const ICON_DELETE: &str = "\u{f01b4}";
+const ICON_BOOKMARK: &str = "\u{f00c0}";
 
 /// Painel de nova sessão, no estilo dos menus do Omarchy: agente, lugar e pasta, cada um com o
 /// rótulo em cima.
@@ -40,6 +44,18 @@ pub struct NewChatPanel {
     remote_note: gtk4::Label,
     create: gtk4::Button,
     browse: gtk4::Button,
+    tx: Sender<Message>,
+    /// "salvar atalho" e o balão dele: pasta, nome, aviso e o botão de salvar.
+    save_shortcut: gtk4::MenuButton,
+    save_target: gtk4::Label,
+    save_name: gtk4::Entry,
+    save_note: gtk4::Label,
+    save_confirm: gtk4::Button,
+    /// "atalhos" e a lista do balão dele, refeita quando `App::shortcuts_version` muda.
+    show_shortcuts: gtk4::MenuButton,
+    shortcut_popover: gtk4::Popover,
+    shortcut_list: gtk4::Box,
+    shortcuts_version: Cell<u64>,
 }
 
 impl NewChatPanel {
@@ -81,10 +97,10 @@ impl NewChatPanel {
         });
         let preview = label("", &["dim"]);
         preview.set_ellipsize(pango::EllipsizeMode::Middle);
-        let names: Vec<String> = dirs::shortcuts().into_iter().map(|(name, _)| name).collect();
-        let shortcuts = label(&format!("atalhos: {}", names.join(", ")), &["dim"]);
+        let shortcuts = label("", &["dim"]);
         shortcuts.set_wrap(true);
-        shortcuts.set_visible(!names.is_empty());
+        let (save_shortcut, save_target, save_name, save_note, save_confirm) = save_shortcut_button(tx);
+        let (show_shortcuts, shortcut_popover, shortcut_list) = shortcuts_button();
         let remote_note = label(
             "roda num tmux da VPS: fechar o chat só desconecta. A senha da chave é pedida no terminal.",
             &["dim"],
@@ -119,7 +135,11 @@ impl NewChatPanel {
         form.append(&group("onde", &place_box));
         let folder = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
         folder.append(&label("pasta", &["dim"]));
-        folder.append(&entry);
+        let entry_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 4);
+        entry_row.append(&entry);
+        entry_row.append(&save_shortcut);
+        entry_row.append(&show_shortcuts);
+        folder.append(&entry_row);
         folder.append(&preview);
         folder.append(&shortcuts);
         folder.append(&remote_note);
@@ -129,7 +149,27 @@ impl NewChatPanel {
             .hscrollbar_policy(gtk4::PolicyType::Never)
             .child(&form)
             .build();
-        Self { root, launches, places, entry, preview, shortcuts, remote_note, create, browse }
+        Self {
+            root,
+            launches,
+            places,
+            entry,
+            preview,
+            shortcuts,
+            remote_note,
+            create,
+            browse,
+            tx: tx.clone(),
+            save_shortcut,
+            save_target,
+            save_name,
+            save_note,
+            save_confirm,
+            show_shortcuts,
+            shortcut_popover,
+            shortcut_list,
+            shortcuts_version: Cell::new(u64::MAX),
+        }
     }
 
     pub fn sync(&self, app: &mut App) {
@@ -149,8 +189,8 @@ impl NewChatPanel {
         let remote = app.new_chat_host.is_some();
         let placeholder = match (remote, omarchy) {
             (true, _) => "pasta na VPS (vazio = ~)",
-            (false, true) => "pasta, atalho do fshort ou . (vazio = ~/Work)",
-            (false, false) => "pasta, atalho do fshort ou . (vazio = a do chat em foco)",
+            (false, true) => "pasta, atalho ou . (vazio = ~/Work)",
+            (false, false) => "pasta, atalho ou . (vazio = a do chat em foco)",
         };
         self.entry.set_placeholder_text(Some(placeholder));
         let preview = app.new_chat_preview();
@@ -165,10 +205,261 @@ impl NewChatPanel {
             }
         }
         self.create.set_sensitive(preview.is_ok());
-        self.shortcuts.set_visible(!remote && self.shortcuts.text().len() > "atalhos: ".len());
         self.remote_note.set_visible(remote);
         self.browse.set_visible(!remote);
+
+        // Atalhos: só desta máquina (na VPS, a pasta vai como foi digitada).
+        self.save_shortcut.set_visible(!remote);
+        self.show_shortcuts.set_visible(!remote);
+        self.save_shortcut.set_sensitive(!app.new_chat_input.trim().is_empty() && preview.is_ok());
+        if std::mem::take(&mut app.shortcut_name_reset) {
+            self.save_name.set_text(&app.shortcut_name);
+            self.save_name.set_position(-1);
+        }
+        if let Ok(path) = &preview {
+            self.save_target.set_text(&format!("atalho para {path}"));
+        }
+        match app.shortcut_save_check() {
+            Ok((_, note)) => {
+                self.save_note.set_text(note.as_deref().unwrap_or_default());
+                self.save_note.set_css_classes(&["dim"]);
+                self.save_note.set_visible(note.is_some());
+                self.save_confirm.set_sensitive(true);
+            }
+            Err(error) => {
+                self.save_note.set_text(&error);
+                self.save_note.set_css_classes(&["danger"]);
+                self.save_note.set_visible(true);
+                self.save_confirm.set_sensitive(false);
+            }
+        }
+        if self.shortcuts_version.replace(app.shortcuts_version) != app.shortcuts_version {
+            let names: Vec<&str> = app.dir_shortcuts.iter().map(|shortcut| shortcut.name.as_str()).collect();
+            self.shortcuts.set_text(&format!("atalhos: {}", names.join(", ")));
+            self.rebuild_shortcuts(app);
+        }
+        self.shortcuts.set_visible(!remote && !app.dir_shortcuts.is_empty());
     }
+
+    /// Refaz a lista do balão "atalhos": os do C-hub (usar, editar, excluir) e os do fshort (só usar).
+    fn rebuild_shortcuts(&self, app: &App) {
+        while let Some(child) = self.shortcut_list.first_child() {
+            self.shortcut_list.remove(&child);
+        }
+        let own: Vec<&DirShortcut> = app.dir_shortcuts.iter().filter(|shortcut| !shortcut.fshort).collect();
+        let fshort: Vec<&DirShortcut> = app.dir_shortcuts.iter().filter(|shortcut| shortcut.fshort).collect();
+        let header = row!(
+            &label(&format!("{ICON_BOOKMARK} "), &["accent"]),
+            &label("atalhos", &["bold"]),
+            &label(&format!(" {}", own.len()), &["dim"])
+        );
+        self.shortcut_list.append(&header);
+        if let Some(error) = &app.shortcut_error {
+            let error = label(error, &["danger"]);
+            error.set_wrap(true);
+            self.shortcut_list.append(&error);
+        }
+        if own.is_empty() {
+            let empty = label("Nenhum atalho ainda. Digite uma pasta no campo e clique em \"salvar atalho\".", &["dim"]);
+            empty.set_wrap(true);
+            self.shortcut_list.append(&empty);
+        }
+        let mut focus = None;
+        for shortcut in own {
+            let item = if app.shortcut_editing.as_deref() == Some(shortcut.name.as_str()) {
+                let (item, name) = self.editing_row(shortcut);
+                focus = Some(name);
+                item
+            } else if app.shortcut_deleting.as_deref() == Some(shortcut.name.as_str()) {
+                self.deleting_row(shortcut)
+            } else {
+                self.shortcut_row(shortcut, true)
+            };
+            self.shortcut_list.append(&item);
+        }
+        if !fshort.is_empty() {
+            let title = label("do fshort (~/.shortcuts, só leitura)", &["dim"]);
+            title.set_margin_top(8);
+            self.shortcut_list.append(&title);
+            for shortcut in fshort {
+                self.shortcut_list.append(&self.shortcut_row(shortcut, false));
+            }
+        }
+        // No ocioso: a linha em edição acabou de entrar no balão.
+        if let Some(entry) = focus {
+            glib::idle_add_local_once(move || {
+                entry.grab_focus();
+            });
+        }
+    }
+
+    /// Nome e pasta; clicar põe o atalho no campo. Os do C-hub têm editar e excluir.
+    fn shortcut_row(&self, shortcut: &DirShortcut, editable: bool) -> gtk4::Box {
+        let name = label(&shortcut.name, &["accent"]);
+        name.set_width_chars(10);
+        let path = label(&claude::display_path(&shortcut.path), &["dim"]);
+        path.set_ellipsize(pango::EllipsizeMode::Middle);
+        path.set_hexpand(true);
+        let item = row!(&name, &path);
+        item.set_spacing(8);
+        if editable {
+            let value = shortcut.name.clone();
+            item.append(&icon_button(ICON_EDIT, "Editar", &self.tx, move || Message::EditShortcut(Some(value.clone()))));
+            let value = shortcut.name.clone();
+            item.append(&icon_button(ICON_DELETE, "Excluir", &self.tx, move || {
+                Message::AskDeleteShortcut(Some(value.clone()))
+            }));
+        }
+        item.set_tooltip_text(Some("Usar no campo de pasta"));
+        let popover = self.shortcut_popover.clone();
+        let value = shortcut.name.clone();
+        let sender = self.tx.clone();
+        let click = gtk4::GestureClick::new();
+        click.connect_released(move |gesture, _, _, _| {
+            gesture.set_state(gtk4::EventSequenceState::Claimed);
+            popover.popdown();
+            let _ = sender.try_send(Message::UseShortcut(value.clone()));
+        });
+        item.add_controller(click);
+        item.add_css_class("chat-row");
+        item.set_cursor_from_name(Some("pointer"));
+        item
+    }
+
+    /// Edição: nome e pasta em campos, salvar e cancelar. Devolve também o campo do nome (foco).
+    fn editing_row(&self, shortcut: &DirShortcut) -> (gtk4::Box, gtk4::Entry) {
+        let name = gtk4::Entry::new();
+        name.set_text(&shortcut.name);
+        name.set_width_chars(10);
+        name.set_tooltip_text(Some("Nome do atalho"));
+        let path = gtk4::Entry::new();
+        path.set_text(&claude::display_path(&shortcut.path));
+        path.set_hexpand(true);
+        path.set_tooltip_text(Some("Pasta (/… ou ~/…)"));
+        let save = gtk4::Button::with_label("salvar");
+        save.add_css_class("text");
+        let old = shortcut.name.clone();
+        let sender = self.tx.clone();
+        let (name_value, path_value) = (name.clone(), path.clone());
+        let submit = move || {
+            let message = Message::UpdateShortcut(old.clone(), name_value.text().to_string(), path_value.text().to_string());
+            let _ = sender.try_send(message);
+        };
+        let on_click = submit.clone();
+        save.connect_clicked(move |_| on_click());
+        let on_name = submit.clone();
+        name.connect_activate(move |_| on_name());
+        path.connect_activate(move |_| submit());
+        let cancel = text_button("cancelar", "Desistir da edição", &self.tx, || Message::EditShortcut(None));
+        let item = gtk4::Box::new(gtk4::Orientation::Horizontal, 4);
+        item.append(&name);
+        item.append(&path);
+        item.append(&save);
+        item.append(&cancel);
+        (item, name)
+    }
+
+    /// Confirmação antes de excluir.
+    fn deleting_row(&self, shortcut: &DirShortcut) -> gtk4::Box {
+        let name = label(&shortcut.name, &["danger"]);
+        name.set_width_chars(10);
+        let question = label(&format!("excluir ({})?", claude::display_path(&shortcut.path)), &[]);
+        question.set_ellipsize(pango::EllipsizeMode::Middle);
+        question.set_hexpand(true);
+        let value = shortcut.name.clone();
+        let yes = text_button("excluir", "Excluir o atalho", &self.tx, move || Message::DeleteShortcut(value.clone()));
+        let no = text_button("não", "Manter o atalho", &self.tx, || Message::AskDeleteShortcut(None));
+        let item = row!(&name, &question, &yes, &no);
+        item.set_spacing(4);
+        item
+    }
+}
+
+/// "salvar atalho": abre um balão com o nome do atalho para a pasta do campo.
+fn save_shortcut_button(tx: &Sender<Message>) -> (gtk4::MenuButton, gtk4::Label, gtk4::Entry, gtk4::Label, gtk4::Button) {
+    let target = label("", &["dim"]);
+    target.set_ellipsize(pango::EllipsizeMode::Middle);
+    target.set_max_width_chars(48);
+    let name = gtk4::Entry::new();
+    name.set_placeholder_text(Some("nome do atalho (ex.: proj)"));
+    name.set_width_chars(24);
+    let sender = tx.clone();
+    name.connect_changed(move |entry| {
+        let _ = sender.try_send(Message::ShortcutNameInput(entry.text().to_string()));
+    });
+    let note = label("", &["dim"]);
+    note.set_wrap(true);
+    note.set_max_width_chars(48);
+    let confirm = gtk4::Button::with_label("salvar");
+    confirm.add_css_class("text");
+    confirm.set_tooltip_text(Some("Salvar o atalho (Enter)"));
+    let cancel = gtk4::Button::with_label("cancelar");
+    cancel.add_css_class("text");
+    cancel.set_tooltip_text(Some("Fechar sem salvar (Esc)"));
+
+    let content = gtk4::Box::new(gtk4::Orientation::Vertical, 6);
+    content.append(&target);
+    content.append(&name);
+    content.append(&note);
+    let actions = flow();
+    actions.append(&confirm);
+    actions.append(&cancel);
+    content.append(&actions);
+    let popover = gtk4::Popover::new();
+    popover.set_has_arrow(false);
+    popover.add_css_class("menu-card");
+    popover.set_child(Some(&content));
+
+    let parent = popover.clone();
+    let sender = tx.clone();
+    confirm.connect_clicked(move |_| {
+        parent.popdown();
+        let _ = sender.try_send(Message::SaveShortcut);
+    });
+    let button = confirm.clone();
+    name.connect_activate(move |_| {
+        if button.is_sensitive() {
+            button.emit_clicked();
+        }
+    });
+    let parent = popover.clone();
+    cancel.connect_clicked(move |_| parent.popdown());
+    let sender = tx.clone();
+    let field = name.clone();
+    popover.connect_show(move |_| {
+        let _ = sender.try_send(Message::ShortcutSaveOpened);
+        let field = field.clone();
+        glib::idle_add_local_once(move || {
+            field.grab_focus();
+        });
+    });
+
+    let menu = gtk4::MenuButton::builder().popover(&popover).label("salvar atalho").build();
+    menu.add_css_class("text");
+    menu.set_tooltip_text(Some("Dar um nome curto a esta pasta"));
+    menu.set_valign(gtk4::Align::Center);
+    (menu, target, name, note, confirm)
+}
+
+/// "atalhos": abre um balão com a lista dos atalhos (montada em `rebuild_shortcuts`).
+fn shortcuts_button() -> (gtk4::MenuButton, gtk4::Popover, gtk4::Box) {
+    let list = gtk4::Box::new(gtk4::Orientation::Vertical, 2);
+    let scroll = gtk4::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk4::PolicyType::Never)
+        .propagate_natural_height(true)
+        .max_content_height(420)
+        .child(&list)
+        .build();
+    let popover = gtk4::Popover::new();
+    popover.set_has_arrow(false);
+    popover.add_css_class("menu-card");
+    popover.set_child(Some(&scroll));
+    popover.set_size_request(520, -1);
+    let menu = gtk4::MenuButton::builder().popover(&popover).label("atalhos").build();
+    menu.add_css_class("text");
+    menu.set_tooltip_text(Some("Ver, editar e excluir os atalhos de pasta"));
+    menu.set_valign(gtk4::Align::Center);
+    (menu, popover, list)
 }
 
 /// Painel das sessões salvas: desta máquina ou de um host do SSH.

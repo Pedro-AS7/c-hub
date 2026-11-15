@@ -62,7 +62,8 @@ Projeto em português (Brasil). Comentários e UI em PT-BR; identificadores de c
   `./install.sh --uninstall` remove. O nome do `.desktop` é o `APP_ID` da janela, que é como o dock liga os dois.
 - `cargo test` — testes do leitor do `/usage` e do `/context` (`src/usage.rs`), de `process_running` e `short_tokens` (`src/app.rs`),
   dos atalhos (`src/shortcuts.rs`), da linha de comando (`src/cli.rs`), do agrupamento da lista de chats (`src/groups.rs`),
-  da lista de chats gravada (`src/restore.rs`), da paleta (`src/themes.rs`), do tema, da fonte, dos limites e da conta do
+  da lista de chats gravada (`src/restore.rs`), da paleta e do tema personalizado (`src/themes.rs`, `src/palettes.rs`),
+  dos atalhos de pasta (`src/dir_shortcuts.rs`), do `config.json` (`src/config.rs`), do tema, da fonte, dos limites e da conta do
   Omarchy (`src/omarchy.rs`), dos hosts, das aspas, do comando do tmux e da lista da VPS (`src/remote.rs`), dos chats da VPS,
   do tmux de fora e do fim da tela (`src/chat.rs`), do comando, do título, do status pelo título e do modo em `src/claude.rs`.
 - Opções: `chube [--agent omarchy|claude|codex] [--model <modelo>] [--open-directory <pasta>] [-- <pastas>…]`. `--agent omarchy`
@@ -81,7 +82,9 @@ src/
                 `run`/`start` ligam o GApplication, a janela e o laço das mensagens
   ui.rs         Janela GTK: lista agrupada | chat (pilha de terminais e painéis) | terminal com abas; painel
                 "uso", seletor de modo, CSS gerado da paleta; `Ui::sync` copia o estado do App para os widgets
-  panels.rs     Painéis no lugar do chat: nova sessão (montado uma vez) e sessões salvas (refeito por versão)
+  panels.rs     Painéis no lugar do chat: nova sessão (montado uma vez, com os balões "salvar atalho" e "atalhos")
+                e sessões salvas (refeito por versão)
+  theme_panel.rs  Painel "tema": escolher o tema e mudar as cores (cria/edita o tema personalizado)
   terminal.rs   VTE: criação, tema (fonte e cores do Omarchy), título (termprop `xterm.title`) e saída do processo
   task.rs       `Task` (futuro no tokio ou mensagem depois de uma espera) e o runtime das tarefas
   chat.rs       Chat (terminal com o agente, status/título/contexto/modo, modo do Omarchy, host e tmux da VPS),
@@ -96,12 +99,15 @@ src/
   shortcuts.rs  Atalhos de teclado (`find`, com as teclas do GDK)
   sessions.rs   Sessões salvas (~/.claude/projects), status de um `claude` pelo pid (~/.claude/sessions)
                 e contexto/modelo pelo fim do .jsonl
-  dirs.rs       Resolve o diretório digitado: ".", "~", caminhos, atalhos do fshort (~/.shortcuts)
+  dirs.rs       Resolve o diretório digitado: ".", "~", caminhos, atalhos de pasta (`nome` ou `nome/sub`)
+  dir_shortcuts.rs  Atalhos de pasta do C-hub (config.json, `shortcuts`) + os do fshort (~/.shortcuts, só leitura)
   groups.rs     Agrupa a lista de chats: categoria (agente omarchy > local > vps)
                 e, dentro dela, pasta; os atalhos de chat de cima/de baixo seguem essa ordem
   usage.rs      Limites do plano via `/usage`
   restore.rs    Lista de chats abertos, gravada a cada mudança e reaberta ao iniciar
-  themes.rs     Paleta do tema do Omarchy (num static, relida quando o tema muda)
+  themes.rs     Paleta em uso (num static, relida quando o tema muda): Omarchy, tema próprio ou personalizado
+  palettes.rs   Temas próprios, o personalizado (`CUSTOM`, JSON) e as cores editáveis (`ColorField`)
+  config.rs     config.json: `theme`, `custom_theme`, `shortcuts` (get/set de chaves, gravação atômica)
 ```
 
 ## Integração com o Claude Code (`src/claude.rs`)
@@ -357,6 +363,17 @@ como veio. Vale só para os chats do Claude (os do Codex e as abas de terminal n
   WCAG). "seguir o Omarchy" só aparece onde há `~/.local/state/omarchy/current/theme/colors.toml` e é o padrão lá. A escolha
   vai para `$XDG_CONFIG_HOME/chube/config.json` (`config.rs`); uma escolha que não existe nesta máquina volta ao padrão
   (`themes::resolve`). Com tema próprio, a conferência do tema do Omarchy não roda.
+- **Tema personalizado (2026-11-15)**: "personalizar…" no menu de temas abre o painel "tema" (`Panel::Theme`,
+  `theme_panel.rs`): escolha do tema, as 5 cores da interface (destaque, fundo, texto, apagado, seleção) com amostra
+  (`ColorDialogButton`) e campo `#rrggbb`, as 16 cores do terminal e a opacidade do fundo (30–100%). Mudar qualquer cor
+  copia o tema em uso para o personalizado (`palettes::CUSTOM`, gravado em `custom_theme` no `config.json`) e o escolhe;
+  o fundo decide claro/escuro pela luminância. Vale na hora (CSS e terminais, `App::save_custom_theme`). Não confere
+  contraste: cores ilegíveis são escolha do usuário.
+- **Atalhos de pasta (2026-11-15)**: para quem não tem o `fshort`. No painel de nova sessão, "salvar atalho" (balão com o
+  nome, sugerido pelo nome da pasta; avisa se o nome já existe ou se a pasta já tem atalho) grava o atalho para a pasta do
+  campo; "atalhos" abre a lista: clicar põe o atalho no campo, editar (nome e pasta, `/…` ou `~/…`) e excluir (com
+  confirmação na própria linha). Ficam em `shortcuts` no `config.json`; os do `~/.shortcuts` aparecem embaixo, só leitura,
+  e um atalho do C-hub com o mesmo nome passa na frente. Esc num balão fecha só o balão.
 - **Cores** do tema atual do Omarchy (`~/.local/state/omarchy/current/theme/colors.toml`, `omarchy.rs`): fundo, texto,
   `muted` (apagado), acento, seleção e as ANSI (verde = "terminou", amarelo = aviso, vermelho = erro). No Starship do usuário o
   acento é `#7aa2f7` (overlay em `~/.config/omarchy/themes/starship/`) e o "verde" é laranja.
@@ -375,7 +392,7 @@ como veio. Vale só para os chats do Claude (os do Codex e as abas de terminal n
   O "verde" é o ANSI verde do tema, a menos que a matiz fique a menos de 45° do amarelo ou do vermelho (no Starship o
   verde é laranja): aí vale o verde claro, o ciano ou o azul do tema, o primeiro que se distinga (`themes::success_color`). Barras de uso em `ProgressBar` fina (cor do nível).
 - Sem barra de título nem botões de janela: o Hyprland move e fecha (Super+W).
-- **Painéis no lugar do chat** (`Panel`): "nova sessão" e "sessões" (abas `local` / hosts), páginas do mesmo `Stack` dos
+- **Painéis no lugar do chat** (`Panel`): "nova sessão", "sessões" (abas `local` / hosts) e "tema", páginas do mesmo `Stack` dos
   terminais; o cabeçalho do chat mostra o nome do painel e Esc volta.
 - **Hover**: `:hover` no CSS. Cada troca de linha redesenha só a linha (~1 ms medido); uma camada com opacidade no lugar do
   CSS não mudou a CPU.
@@ -410,6 +427,9 @@ Validado por captura de tela: o `claude` do chat abre com `--prompt`, responde, 
 Na migração para o Omarchy (2026-11-13), validado por captura: tema Starship (acento azul, vidro desfocado, JetBrainsMono
 Nerd Font), painéis de nova sessão e de sessões (local e a mensagem de "sem acesso" da VPS) e um chat no modo do Omarchy
 (`auto mode on`, seletor em "automático"). Não testado com clique: os painéis, troca de tema ao vivo e qualquer chat da VPS.
+Painel "tema" e balões de atalhos (2026-11-15): validados por captura o menu de temas com "personalizar…" e o painel
+"tema" (cores do Starship nas amostras e nos campos). **Não testado**: mudar cor (campo ou seletor), opacidade, os balões
+"salvar atalho"/"atalhos" (criar, editar, excluir, usar) e o Esc dentro deles — a digitação virtual não chegou à janela de teste.
 Ainda não testado com clique: troca entre chats, painel de sessões, diálogo de nova sessão, sub-chat, "Reabrir sessão",
 digitação nos terminais, fechar chat.
 
