@@ -22,7 +22,7 @@ use crate::codex;
 use crate::dirs;
 use crate::groups::{self, Category, CategoryGroup};
 use crate::omarchy;
-use crate::remote::{self, Listing, RemoteStatus};
+use crate::remote::{self, Listing, RemoteStatus, TmuxSession};
 use crate::restore::{self, OpenChat, OpenChats};
 use crate::sessions::{self, Running, SavedSession, Stats};
 use crate::shortcuts::Shortcut;
@@ -98,7 +98,8 @@ pub enum Message {
     ShowSessions,
     /// Sessões de qual lugar mostrar: esta máquina (`None`) ou um host do SSH.
     SessionsHost(Option<String>),
-    SessionsLoaded(Vec<SavedSession>),
+    /// Sessões salvas e tmux abertos desta máquina.
+    SessionsLoaded(Vec<SavedSession>, Vec<TmuxSession>),
     /// Recarrega as sessões do lugar mostrado.
     ReloadSessions,
     RemoteListed(String, Result<Listing, String>),
@@ -106,8 +107,9 @@ pub enum Message {
     ResumeSession(usize),
     /// Retoma uma sessão salva da VPS (host, índice na lista dela).
     ResumeRemote(String, usize),
-    /// Entra numa sessão do tmux aberta na VPS (host, índice na lista dela).
-    AttachTmux(String, usize),
+    /// Entra numa sessão do tmux aberta fora do Chube: na VPS (host, índice na lista dela) ou
+    /// aqui (`None`, índice em `local_tmux`).
+    AttachTmux(Option<String>, usize),
     /// Sub-chat: nova sessão com o contexto do chat em foco.
     SubChat,
     OpenDirectories(Result<Flags, String>),
@@ -137,7 +139,7 @@ pub enum Message {
     ContextWindowFetched(String, Option<u32>),
     /// Estado dos chats de um host da VPS.
     RemotePolled(String, Result<Vec<RemoteStatus>, String>),
-    /// Encerra o agente do chat em foco na VPS (mata o tmux dele).
+    /// Encerra o agente do chat em foco, aqui ou na VPS (mata o tmux dele).
     KillRemote,
     RemoteKilled(Result<(), String>),
     /// Leva a sessão do chat em foco para o terminal do Omarchy.
@@ -200,6 +202,8 @@ pub struct App {
     pub new_chat_input_reset: bool,
     /// Sessões salvas desta máquina; `None` enquanto carrega.
     pub saved_sessions: Option<Vec<SavedSession>>,
+    /// Sessões do tmux abertas nesta máquina (criadas pelo celular ou de chats fechados).
+    pub local_tmux: Vec<TmuxSession>,
     /// Lugar mostrado no painel de sessões: esta máquina (`None`) ou um host do SSH.
     pub sessions_host: Option<String>,
     pub remote_sessions: HashMap<String, RemoteState>,
@@ -268,6 +272,7 @@ impl App {
             new_chat_input: String::new(),
             new_chat_input_reset: false,
             saved_sessions: None,
+            local_tmux: Vec::new(),
             sessions_host: None,
             remote_sessions: HashMap::new(),
             expanded_dirs: HashSet::new(),
@@ -309,6 +314,14 @@ impl App {
             };
             app.chats.push(Chat::restore(id, saved, has_file));
         }
+        // Os chats daqui cujo tmux continua aberto (o agente seguiu rodando depois de fechar o
+        // app) só reconectam: entrar no tmux não sobe outro agente, então não ficam em espera.
+        let alive = remote::local_panes();
+        for chat in app.chats.iter_mut().filter(|chat| chat.host.is_none()) {
+            if chat.tmux.as_ref().is_some_and(|tmux| alive.contains_key(tmux)) {
+                chat.status = Status::Starting;
+            }
+        }
         app.focused = open.focused.min(app.chats.len().saturating_sub(1));
         app.open_chats = open;
         app.add_terminal_tab();
@@ -335,7 +348,16 @@ impl App {
                     self.chats[index].mark_seen();
                 }
             }
-            Message::CloseChat(index) => self.close_chat(index),
+            Message::CloseChat(index) => {
+                // Num chat deste notebook, o × encerra o agente, como antes do tmux (senão os
+                // `claude` fechados se acumulariam escondidos). Na VPS e num tmux aberto pelo
+                // celular, só desconecta. Fechar o app também só desconecta.
+                let tmux = self.chats.get(index).filter(|chat| chat.host.is_none() && !chat.attach_only).and_then(|chat| chat.tmux.clone());
+                self.close_chat(index);
+                if let Some(tmux) = tmux {
+                    return Task::future(async move { Message::RemoteKilled(remote::kill_local(tmux).await) });
+                }
+            }
             Message::ReopenChat => {
                 let id = self.take_terminal_id();
                 if let Some(chat) = self.chats.get(self.focused).and_then(|chat| chat.reopen(id)) {
@@ -420,8 +442,9 @@ impl App {
                 return self.load_sessions();
             }
             Message::ReloadSessions => return self.load_sessions(),
-            Message::SessionsLoaded(list) => {
+            Message::SessionsLoaded(list, tmux) => {
                 self.saved_sessions = Some(list);
+                self.local_tmux = tmux;
                 self.sessions_version += 1;
             }
             Message::RemoteListed(host, result) => {
@@ -457,17 +480,18 @@ impl App {
                 }
             }
             Message::AttachTmux(host, index) => {
-                let tmux = match self.remote_sessions.get(&host) {
-                    Some(RemoteState::Loaded(listing)) => listing.tmux.get(index).cloned(),
-                    _ => None,
+                let tmux = match &host {
+                    None => self.local_tmux.get(index).cloned(),
+                    Some(host) => match self.remote_sessions.get(host) {
+                        Some(RemoteState::Loaded(listing)) => listing.tmux.get(index).cloned(),
+                        _ => None,
+                    },
                 };
                 let Some(tmux) = tmux else {
                     return Task::none();
                 };
                 self.panel = Panel::None;
-                if let Some(open) = self.chats.iter().position(|chat| {
-                    chat.host.as_deref() == Some(host.as_str()) && chat.tmux.as_deref() == Some(tmux.name.as_str())
-                }) {
+                if let Some(open) = self.chats.iter().position(|chat| chat.host == host && chat.tmux.as_deref() == Some(tmux.name.as_str())) {
                     self.focused = open;
                     self.focus = Some(Focus::Chat);
                     // Encerrado (rede caída, por exemplo), volta a entrar no mesmo tmux.
@@ -478,7 +502,14 @@ impl App {
                 }
                 let title = claude::title_from_terminal(&tmux.title).unwrap_or_else(|| tmux.name.clone());
                 let id = self.take_terminal_id();
-                let chat = Chat::attach(id, host, tmux.name, PathBuf::from(tmux.path), short_title(&title));
+                let path = match host {
+                    // Aqui a pasta é de verdade: `~` voltaria a ser a home.
+                    None => tmux.path.strip_prefix('~').map_or_else(|| PathBuf::from(&tmux.path), |rest| {
+                        claude::home_dir().join(rest.trim_start_matches('/'))
+                    }),
+                    Some(_) => PathBuf::from(tmux.path),
+                };
+                let chat = Chat::attach(id, host, tmux.name, path, short_title(&title));
                 self.open_chat(self.chats.len(), chat);
             }
             Message::SubChat => {
@@ -588,16 +619,19 @@ impl App {
                 let Some(chat) = self.chats.get(self.focused) else {
                     return Task::none();
                 };
-                let (Some(host), Some(tmux)) = (chat.host.clone(), chat.tmux.clone()) else {
+                let (host, Some(tmux)) = (chat.host.clone(), chat.tmux.clone()) else {
                     return Task::none();
                 };
-                self.remote_sessions.remove(&host);
                 self.close_chat(self.focused);
+                let Some(host) = host else {
+                    return Task::future(async move { Message::RemoteKilled(remote::kill_local(tmux).await) });
+                };
+                self.remote_sessions.remove(&host);
                 return Task::future(async move { Message::RemoteKilled(remote::kill(host, tmux).await) });
             }
             Message::RemoteKilled(result) => {
                 if let Err(error) = result {
-                    self.notice = Some(format!("não consegui encerrar na VPS: {error}"));
+                    self.notice = Some(format!("não consegui encerrar o tmux: {error}"));
                 }
             }
             Message::OpenInTerminal => {
@@ -606,8 +640,8 @@ impl App {
                     return Task::none();
                 };
                 let id = chat.id;
-                // Na VPS, o terminal do Omarchy entra no mesmo tmux: não depende do histórico.
-                if chat.host.is_some() {
+                // No tmux (aqui ou na VPS), o terminal do Omarchy entra nele: não depende do histórico.
+                if chat.tmux.is_some() {
                     return self.handle(Message::OpenInTerminalChecked(id, true));
                 }
                 let Some(session_id) = chat.session_id.clone() else {
@@ -623,9 +657,9 @@ impl App {
                 let chat = &self.chats[index];
                 let pid = chat.pid();
                 let cwd = chat.local_dir();
-                let command = if chat.host.is_some() {
-                    // Fechar o chat só desconecta; o terminal novo entra no mesmo tmux da VPS.
-                    let mut copy = chat.reopen(0).expect("chat da VPS sempre reabre");
+                let command = if chat.tmux.is_some() {
+                    // Fechar o chat só desconecta; o terminal novo entra no mesmo tmux.
+                    let mut copy = chat.reopen(0).expect("chat no tmux sempre reabre");
                     copy.command()
                 } else {
                     let Some(session_id) = chat.session_id.clone().filter(|_| saved) else {
@@ -904,7 +938,7 @@ impl App {
                     let mut list = sessions::list();
                     list.extend(codex::list());
                     list.sort_by(|a, b| b.modified.cmp(&a.modified));
-                    Message::SessionsLoaded(list)
+                    Message::SessionsLoaded(list, remote::list_local_tmux())
                 })
             }
             Some(host) => {
@@ -993,9 +1027,16 @@ impl App {
             chat.status = Status::Starting;
             self.spawn_chat_terminal(self.focused);
         }
+        // Os que voltaram reconectando a um tmux vivo (`App::new`) abrem o terminal já.
+        for index in 0..self.chats.len() {
+            if self.chats[index].status == Status::Starting && self.chats[index].terminal.is_none() {
+                self.spawn_chat_terminal(index);
+            }
+        }
     }
 
-    /// Tira o chat da lista. O agente recebe SIGHUP: sai como no `/exit`, com a sessão salva.
+    /// Tira o chat da lista. O terminal recebe SIGHUP: o tmux só desconecta e o agente continua
+    /// (encerrar é o botão de parar, `Message::KillRemote`).
     fn close_chat(&mut self, index: usize) {
         if index >= self.chats.len() {
             return;
@@ -1114,21 +1155,24 @@ impl App {
             return Task::none();
         }
         let focused = self.chats.get(self.focused).map(|chat| chat.id);
-        let targets: Vec<(TermId, Agent, Option<u32>, Option<String>, Option<String>)> = self
+        let targets: Vec<(TermId, Agent, Option<String>, Option<String>, Option<String>)> = self
             .chats
             .iter()
-            // Os da VPS não têm arquivos aqui: o status vem do título do terminal.
+            // Os da VPS não têm arquivos aqui: o status vem da conexão de estado e do título.
             .filter(|chat| chat.is_alive() && chat.status != Status::Suspended && chat.host.is_none())
-            .map(|chat| (chat.id, chat.agent, chat.agent_pid(), chat.session_id.clone(), chat.codex_thread_hint.clone()))
+            .map(|chat| (chat.id, chat.agent, chat.tmux.clone(), chat.session_id.clone(), chat.codex_thread_hint.clone()))
             .collect();
         if targets.is_empty() {
             return Task::none();
         }
         self.polling = true;
         Task::blocking(move || {
+            // O agente roda num tmux: o pid dele é o do painel ou de um filho do painel.
+            let panes = remote::local_panes();
             let list = targets
                 .into_iter()
-                .map(|(chat, agent, pid, session_id, hint)| {
+                .map(|(chat, agent, tmux, session_id, hint)| {
+                    let pid = tmux.and_then(|tmux| panes.get(&tmux).copied()).and_then(sessions::agent_in);
                     if agent == Agent::Codex {
                         let session_id = hint.as_deref().and_then(codex::resolve_hint).or(session_id);
                         let snapshot = session_id.as_deref().and_then(codex::snapshot);

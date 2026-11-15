@@ -141,6 +141,16 @@ pub struct Running {
     pub status: String,
 }
 
+/// Pid do `claude` de um painel do tmux: o próprio processo do painel ou um filho dele (o tmux
+/// roda o comando por um `sh -c`, que pode ou não fazer `exec`). É o que tem o
+/// `~/.claude/sessions/<pid>.json`.
+pub fn agent_in(pane_pid: u32) -> Option<u32> {
+    let children = fs::read_to_string(format!("/proc/{pane_pid}/task/{pane_pid}/children")).unwrap_or_default();
+    std::iter::once(pane_pid)
+        .chain(children.split_whitespace().filter_map(|pid| pid.parse().ok()))
+        .find(|pid| home_dir().join(format!(".claude/sessions/{pid}.json")).is_file())
+}
+
 pub fn running(pid: u32) -> Option<Running> {
     let text = fs::read_to_string(home_dir().join(format!(".claude/sessions/{pid}.json"))).ok()?;
     let value = serde_json::from_str::<Value>(&text).ok()?;

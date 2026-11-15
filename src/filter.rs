@@ -52,16 +52,6 @@ pub fn wrap(argv: Vec<String>) -> Vec<String> {
     [exe, ARG.to_owned(), "--".to_owned()].into_iter().chain(argv).collect()
 }
 
-/// Pid do comando que o filtro `pid` roda (o primeiro filho dele).
-pub fn inner_pid(pid: u32) -> Option<u32> {
-    std::fs::read_to_string(format!("/proc/{pid}/task/{pid}/children"))
-        .ok()?
-        .split_whitespace()
-        .next()?
-        .parse()
-        .ok()
-}
-
 /// Troca as cores da faixa nas sequências SGR (`ESC [ … m`). Guarda o fim de uma sequência
 /// cortada entre duas leituras para a próxima.
 #[derive(Default)]

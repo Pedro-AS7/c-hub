@@ -15,6 +15,7 @@ use crate::app::{App, Launch, Message, RemoteState};
 use crate::chat::Status;
 use crate::claude;
 use crate::dirs;
+use crate::remote;
 use crate::sessions::{self, SavedSession};
 use crate::ui::{
     ICON_LAPTOP, ICON_OMARCHY, ICON_SERVER, button_message, choice, clickable_row, label, row, status_glyph, text_button,
@@ -234,6 +235,26 @@ impl SessionsPanel {
             self.list.append(&label("carregando…", &["dim"]));
             return;
         };
+        // Os tmux daqui que nenhum chat mostra: criados pelo celular ou de chats fechados.
+        let loose: Vec<(usize, &remote::TmuxSession)> = app
+            .local_tmux
+            .iter()
+            .enumerate()
+            .filter(|(_, tmux)| {
+                !app.chats.iter().any(|chat| chat.host.is_none() && chat.tmux.as_deref() == Some(tmux.name.as_str()) && chat.is_alive())
+            })
+            .collect();
+        if !loose.is_empty() {
+            self.list.append(&label("tmux abertos aqui", &["dim"]));
+            for (index, tmux) in loose {
+                self.list.append(&tmux_item(tmux, tmux.attached.then_some("conectado em outro lugar"), tx, move || {
+                    Message::AttachTmux(None, index)
+                }));
+            }
+            let gap = label("sessões salvas", &["dim"]);
+            gap.set_margin_top(8);
+            self.list.append(&gap);
+        }
         if list.is_empty() {
             self.list.append(&label("nenhuma sessão salva encontrada.", &["dim"]));
             return;
@@ -290,20 +311,13 @@ impl SessionsPanel {
             let here = app.chats.iter().any(|chat| {
                 chat.host.as_deref() == Some(host) && chat.tmux.as_deref() == Some(tmux.name.as_str()) && chat.is_alive()
             });
-            let title = claude::title_from_terminal(&tmux.title).unwrap_or_else(|| tmux.title.clone());
-            let mut details = vec![tmux.name.clone(), tmux.path.clone()];
-            if here {
-                details.push("aberto aqui".into());
-            } else if tmux.attached {
-                details.push("conectado em outro lugar".into());
-            }
-            let (glyph, class) = match claude::status_from_title(&tmux.title) {
-                Some(status) => status_glyph(status),
-                None => (ICON_TMUX, "dim"),
+            let note = if here {
+                Some("aberto aqui")
+            } else {
+                tmux.attached.then_some("conectado em outro lugar")
             };
-            let item = two_lines(glyph, class, &title, &details.join(" · "));
             let host = host.to_owned();
-            self.list.append(&clickable(item, tx, move || Message::AttachTmux(host.clone(), index)));
+            self.list.append(&tmux_item(tmux, note, tx, move || Message::AttachTmux(Some(host.clone()), index)));
         }
 
         let gap = label(&format!("sessões salvas em {host}"), &["dim"]);
@@ -317,6 +331,23 @@ impl SessionsPanel {
             self.list.append(&saved_item(app, saved, tx, move || Message::ResumeRemote(host.clone(), index)));
         }
     }
+}
+
+/// Uma sessão do tmux: status pelo título do painel, título; embaixo, nome, pasta e `note`.
+fn tmux_item(
+    tmux: &remote::TmuxSession,
+    note: Option<&str>,
+    tx: &Sender<Message>,
+    message: impl Fn() -> Message + 'static,
+) -> gtk4::Widget {
+    let title = claude::title_from_terminal(&tmux.title).unwrap_or_else(|| tmux.title.clone());
+    let mut details = vec![tmux.name.clone(), tmux.path.clone()];
+    details.extend(note.map(str::to_owned));
+    let (glyph, class) = match claude::status_from_title(&tmux.title) {
+        Some(status) => status_glyph(status),
+        None => (ICON_TMUX, "dim"),
+    };
+    clickable(two_lines(glyph, class, &title, &details.join(" · ")), tx, message).upcast()
 }
 
 /// Uma sessão salva: status e título; embaixo, agente, quando e onde está aberta.

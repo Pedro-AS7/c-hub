@@ -130,6 +130,47 @@ fn ssh_args(host: &str, tty: bool, script: &str) -> Vec<String> {
 /// Script do shell da VPS. Sem `agent_command`, só entra numa sessão do tmux que já existe
 /// (uma aberta pelo celular, por exemplo).
 fn remote_script(dir: &str, tmux: &str, agent_command: Option<&str>) -> String {
+    // Num login sem terminal, o `bash -l` carrega o PATH de lá (`~/.local/bin`, nvm…).
+    let agent = agent_command.map(|agent| format!("bash -lc {}", quote(agent)));
+    tmux_script("tmux", &quote_dir(dir), tmux, agent.as_deref(), &[])
+}
+
+/// Servidor do tmux dos chats deste notebook: separado do tmux do usuário e sem a configuração
+/// dele (a do Omarchy liga Alt+Esc a "fechar painel", Alt+Enter a "dividir"… em qualquer modo).
+/// O celular entra nele com o mesmo `-L`.
+pub const LOCAL_TMUX: &str = "tmux -L chube -f /dev/null";
+
+/// Variáveis da sessão gráfica levadas aos tmux deste notebook: o servidor do tmux pode ter sido
+/// aberto pelo celular (pelo `sshd`, sem Wayland), e o agente precisa delas para colar imagens,
+/// abrir o navegador ou notificar.
+const DESKTOP_ENV: &[&str] = &[
+    "PATH",
+    "WAYLAND_DISPLAY",
+    "DISPLAY",
+    "XDG_RUNTIME_DIR",
+    "DBUS_SESSION_BUS_ADDRESS",
+    "HYPRLAND_INSTANCE_SIGNATURE",
+    "XDG_CURRENT_DESKTOP",
+    "XDG_SESSION_TYPE",
+];
+
+/// Programa e argumentos de um chat deste notebook: o mesmo tmux dos chats da VPS, mas rodado
+/// aqui. Assim o celular entra nele por SSH, e fechar o Chube não encerra o agente.
+/// `agent_command` são as palavras do comando já entre aspas do shell: o tmux as recebe como
+/// argumentos e roda o programa direto, sem shell (o pid do painel é o do agente).
+pub fn local_command(dir: &Path, tmux: &str, agent_command: Option<&str>) -> (String, Vec<String>) {
+    let env: Vec<String> = DESKTOP_ENV
+        .iter()
+        .filter_map(|key| std::env::var(key).ok().map(|value| format!("{key}={value}")))
+        .collect();
+    let script = tmux_script(LOCAL_TMUX, &quote(&dir.to_string_lossy()), tmux, agent_command, &env);
+    ("sh".into(), vec!["-c".into(), script])
+}
+
+/// Entra na sessão `tmux` (ou a cria rodando `agent`, palavras já entre aspas, na pasta `dir`,
+/// também já entre aspas) e põe as opções das sessões do Chube. Sem `agent`, só entra.
+/// `binary` é o tmux com as opções do servidor (`LOCAL_TMUX` aqui).
+fn tmux_script(binary: &str, dir: &str, tmux: &str, agent: Option<&str>, env: &[String]) -> String {
     let name = quote(tmux);
     // Só nas sessões do Chube: sem a barra (o Chube já mostra o título), mouse para rolar o
     // histórico com a roda, e o título do agente repassado ao terminal (dá o status do chat).
@@ -141,14 +182,74 @@ fn remote_script(dir: &str, tmux: &str, agent_command: Option<&str>) -> String {
         "set-option -as terminal-features ',xterm-256color:RGB'".to_owned(),
     ]
     .join(" \\; ");
-    match agent_command {
-        Some(agent) => format!(
-            "cd {dir} 2>/dev/null || cd; exec tmux new-session -A -s {name} -e COLORTERM=truecolor bash -lc {agent} \\; {options}",
-            dir = quote_dir(dir),
-            agent = quote(agent),
-        ),
-        None => format!("exec tmux attach-session -t {name} \\; {options}"),
+    match agent {
+        Some(agent) => {
+            let env: String = env.iter().map(|pair| format!(" -e {}", quote(pair))).collect();
+            // Sem prefixo nas sessões criadas pelo Chube: o C-b é o "mandar para o fundo" do
+            // Claude Code. (Numa sessão de fora, o prefixo de quem a abriu fica.)
+            format!(
+                "cd {dir} 2>/dev/null || cd; exec {binary} new-session -A -s {name} -e COLORTERM=truecolor{env} {agent} \\; {options} \\; set-option -t {name} prefix None \\; set-option -t {name} prefix2 None"
+            )
+        }
+        None => format!("exec {binary} attach-session -t {name} \\; {options}"),
     }
+}
+
+/// Roda um script neste notebook (o mesmo que iria à VPS), com o tempo máximo das consultas.
+async fn run_local(script: &str) -> Result<String, String> {
+    let output = tokio::process::Command::new("sh")
+        .args(["-c", script])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .output();
+    let output = tokio::time::timeout(TIMEOUT, output)
+        .await
+        .map_err(|_| "o tmux não respondeu".to_owned())?
+        .map_err(|error| format!("não consegui rodar o sh: {error}"))?;
+    if output.status.success() {
+        return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    Err(stderr.lines().last().unwrap_or("erro no tmux").trim().to_owned())
+}
+
+/// Encerra a sessão do tmux de um chat deste notebook (e o agente dentro dela).
+pub async fn kill_local(tmux: String) -> Result<(), String> {
+    run_local(&format!("{LOCAL_TMUX} kill-session -t {}", quote(&tmux))).await.map(|_| ())
+}
+
+/// Sessões do tmux abertas neste notebook (as do celular, as de chats fechados). Sem servidor do
+/// tmux, uma lista vazia.
+pub fn list_local_tmux() -> Vec<TmuxSession> {
+    let script = format!("printf 'H\\t%s\\n' \"$HOME\"\n{}", LIST_TMUX.replacen("tmux", LOCAL_TMUX, 1));
+    let Ok(output) = std::process::Command::new("sh")
+        .args(["-c", &script])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+    else {
+        return Vec::new();
+    };
+    parse_listing("local", &String::from_utf8_lossy(&output.stdout)).tmux
+}
+
+/// Pid do painel de cada sessão do tmux deste notebook (o agente é ele ou um filho dele).
+pub fn local_panes() -> std::collections::HashMap<String, u32> {
+    let Ok(output) = std::process::Command::new("tmux")
+        .args(["-L", "chube", "list-panes", "-a", "-F", "#{session_name}\t#{pane_pid}"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+    else {
+        return Default::default();
+    };
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.split_once('\t'))
+        .filter_map(|(name, pid)| Some((name.to_owned(), pid.trim().parse().ok()?)))
+        .collect()
 }
 
 /// Roda um script na VPS sem terminal e sem pedir senha (usa o mestre do SSH ou o agente SSH).
@@ -332,12 +433,16 @@ pub struct Listing {
     pub tmux: Vec<TmuxSession>,
 }
 
+/// Linhas `T` das sessões do tmux (nome, se há alguém conectado, pasta e título do painel).
+const LIST_TMUX: &str =
+    "tmux list-sessions -F 'T\t#{session_name}\t#{session_attached}\t#{pane_current_path}\t#{pane_title}' 2>/dev/null";
+
 /// Lista as sessões da VPS. Só lê os campos usados na lista (pasta e título), com `grep -o`,
 /// para não trazer o histórico inteiro pela rede.
 pub async fn list(host: String) -> Result<Listing, String> {
     const SCRIPT: &str = r#"
 printf 'H\t%s\n' "$HOME"
-tmux list-sessions -F 'T	#{session_name}	#{session_attached}	#{pane_current_path}	#{pane_title}' 2>/dev/null
+TMUX_LIST
 cd ~/.claude/projects 2>/dev/null || exit 0
 ls -t -- */*.jsonl 2>/dev/null | head -n 150 | while IFS= read -r f; do
   printf 'F\t%s\t%s\n' "$(stat -c %Y -- "$f")" "$f"
@@ -345,7 +450,7 @@ ls -t -- */*.jsonl 2>/dev/null | head -n 150 | while IFS= read -r f; do
   grep -o '"\(customTitle\|aiTitle\|lastPrompt\)":"[^"]*' -- "$f" | tail -n 3
 done
 "#;
-    let text = run(&host, SCRIPT).await?;
+    let text = run(&host, &SCRIPT.replace("TMUX_LIST", LIST_TMUX)).await?;
     Ok(parse_listing(&host, &text))
 }
 

@@ -61,7 +61,8 @@ pub struct Chat {
     pub auto: bool,
     /// Host do SSH, num chat da VPS; `None` nesta máquina. Na VPS, `cwd` é a pasta de lá.
     pub host: Option<String>,
-    /// Sessão do tmux da VPS onde o agente roda (`remote.rs`).
+    /// Sessão do tmux onde o agente roda, aqui ou na VPS (`remote.rs`). Definida ao abrir o
+    /// terminal; o celular entra nela por SSH.
     pub tmux: Option<String>,
     /// Chat que só entra numa sessão do tmux aberta fora do Chube (pelo celular, por exemplo).
     pub attach_only: bool,
@@ -172,12 +173,12 @@ impl Chat {
         chat
     }
 
-    /// Entra numa sessão do tmux da VPS aberta fora do Chube.
-    pub fn attach(id: TermId, host: String, tmux: String, cwd: PathBuf, title: String) -> Self {
+    /// Entra numa sessão do tmux aberta fora do Chube (na VPS, ou aqui pelo celular).
+    pub fn attach(id: TermId, host: Option<String>, tmux: String, cwd: PathBuf, title: String) -> Self {
         let mut chat = Self::new(id, Agent::Claude, cwd, None, None);
         chat.session_id = None;
         chat.title = title;
-        chat.host = Some(host);
+        chat.host = host;
         chat.tmux = Some(tmux);
         chat.attach_only = true;
         chat
@@ -191,15 +192,21 @@ impl Chat {
         self
     }
 
-    /// Programa e argumentos do terminal do chat: o agente aqui ou, na VPS, o `ssh` que entra
-    /// no tmux de lá. Na VPS, o prompt só vai na primeira vez (depois o tmux já existe).
+    /// Programa e argumentos do terminal do chat: o tmux daqui (`sh`) ou, na VPS, o `ssh` que
+    /// entra no tmux de lá; nos dois, o tmux é criado rodando o agente se ainda não existe. O
+    /// prompt só vai na primeira vez (depois o tmux já existe).
     pub fn command(&mut self) -> (String, Vec<String>) {
         let prompt = self.prompt.take();
         let model = self.model.as_deref();
-        let Some(host) = &self.host else {
-            return self.agent.command(&self.start, model, prompt.as_deref(), self.auto);
-        };
         let tmux = self.tmux.get_or_insert_with(crate::remote::new_tmux_name).clone();
+        let Some(host) = &self.host else {
+            let agent = (!self.attach_only).then(|| {
+                let (program, args) = self.agent.command(&self.start, model, prompt.as_deref(), self.auto);
+                let words: Vec<String> = std::iter::once(program).chain(args).map(|word| crate::remote::quote(&word)).collect();
+                words.join(" ")
+            });
+            return crate::remote::local_command(&self.cwd, &tmux, agent.as_deref());
+        };
         let agent = (!self.attach_only).then(|| {
             let args = self.agent.args(&self.start, model, prompt.as_deref(), self.auto);
             // Retomar uma sessão nova que nunca chegou a gravar o histórico falha: começa de novo
@@ -367,7 +374,6 @@ impl Chat {
         self.pid.get()
     }
 
-    /// Pid do agente em si (o do `~/.claude/sessions/<pid>.json`): no Claude, o filho do filtro.
     /// Aplica um status lido do agente. "pronto" depois de "trabalhando", num chat fora de foco,
     /// vira "terminou" e fica assim (as leituras seguintes também dizem "pronto") até o chat ser
     /// aberto; o chat em foco você já está vendo terminar.
@@ -385,10 +391,6 @@ impl Chat {
         }
     }
 
-    pub fn agent_pid(&self) -> Option<u32> {
-        let pid = self.pid()?;
-        if self.agent == Agent::Claude { crate::filter::inner_pid(pid) } else { Some(pid) }
-    }
 }
 
 /// As últimas `count` linhas da tela, sem as linhas vazias do fim (o VTE devolve a tela inteira,
@@ -508,6 +510,29 @@ mod tests {
         fork.command();
         assert_ne!(fork.tmux, chat.tmux);
         assert_eq!(fork.host.as_deref(), Some("vps-r1"));
+    }
+
+    #[test]
+    fn chat_local_roda_num_tmux_daqui() {
+        let mut chat = Chat::new(1, Agent::Claude, "/tmp/meu projeto".into(), None, Some("oi".into()));
+        let (program, args) = chat.command();
+        assert_eq!(program, "sh");
+        assert_eq!(args[0], "-c");
+        let tmux = chat.tmux.clone().unwrap();
+        assert!(tmux.starts_with(crate::remote::TMUX_PREFIX));
+        let script = &args[1];
+        assert!(script.starts_with(&format!("cd '/tmp/meu projeto' 2>/dev/null || cd; exec tmux -L chube -f /dev/null new-session -A -s {tmux} ")));
+        assert!(script.contains("prefix None"));
+        assert!(script.contains("ANTHROPIC_API_KEY"));
+        assert!(script.contains("--session-id"));
+        // O prompt só na primeira vez; reabrir volta ao mesmo tmux.
+        let mut reopened = chat.reopen(2).unwrap();
+        let script = reopened.command().1.pop().unwrap();
+        assert!(script.contains(&format!("-s {tmux} ")) && script.contains("--resume"));
+        assert!(!script.contains(" -- oi"));
+        let mut attach = Chat::attach(3, None, "celular".into(), "/tmp".into(), "celular".into());
+        let script = attach.command().1.pop().unwrap();
+        assert!(script.starts_with("exec tmux -L chube -f /dev/null attach-session -t celular"));
     }
 
     #[test]

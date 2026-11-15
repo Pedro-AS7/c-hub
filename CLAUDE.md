@@ -90,8 +90,8 @@ src/
   codex.rs      Comando e histórico do Codex
   omarchy.rs    O que vem do Omarchy: cores do tema, modo vidro, fonte do foot, fonte mono do fontconfig,
                 agente padrão, limites de uso e conta ativa (só leitura)
-  remote.rs     Sessões na VPS: hosts do ~/.ssh/config, comando ssh + tmux, lista das sessões e dos tmux de lá,
-                conexão de estado (`poll`)
+  remote.rs     Sessões no tmux: na VPS (hosts do ~/.ssh/config, ssh + tmux, lista, conexão de estado `poll`) e
+                aqui (`local_command`, servidor `-L chube`, `local_panes`, `list_local_tmux`)
   claude.rs     Comando do `claude` interativo, caminho do binário, título vindo do terminal, Mode
   shortcuts.rs  Atalhos de teclado (`find`, com as teclas do GDK)
   sessions.rs   Sessões salvas (~/.claude/projects), status de um `claude` pelo pid (~/.claude/sessions)
@@ -233,6 +233,28 @@ env -u ANTHROPIC_API_KEY claude (--session-id <uuid> | --resume <id> | --resume 
   configuração temporária, sem enviar pedido ao modelo, confirmando o título OSC abreviado. O teste gráfico headless
   não pôde iniciar: o sandbox impede criar o socket do D-Bus. Diálogo, cliques, digitação e retomada/fork reais precisam
   de conferência manual no desktop.
+
+## Chats locais no tmux (2026-11-14, branch `tmux-local`)
+
+**Por quê:** o C-hub Android (`~/projects/chub-android`) entra por SSH nas sessões do notebook; um PTY dentro do app não
+deixa ninguém de fora entrar. Agora cada chat local roda num tmux daqui, como os da VPS.
+
+- Servidor próprio: `tmux -L chube -f /dev/null` (`remote::LOCAL_TMUX`), separado do tmux do usuário e sem a configuração
+  do Omarchy (Alt+Esc, Alt+Enter… pegariam teclas da TUI). Sessões `chube-<8 hex>`, as mesmas opções dos chats da VPS e
+  sem prefixo (o C-b é do Claude Code). `remote::local_command` = `sh -c '<cd>; exec tmux … new-session -A … <agente>'`,
+  com as variáveis da sessão gráfica (`DESKTOP_ENV`: Wayland, D-Bus, Hyprland…) passadas com `-e`, porque o servidor pode
+  ter sido aberto pelo celular, sem elas. O agente vai como palavras já entre aspas: o tmux roda direto, sem shell.
+- O filtro de cores (`filter.rs`) continua por fora do tmux. Status: `remote::local_panes` (`list-panes -a`) dá o pid do
+  painel; `sessions::agent_in` acha o `claude` nele ou num filho (o `Chat::agent_pid` saiu).
+- **× num chat daqui encerra** (mata o tmux), como antes; na VPS e num tmux aberto pelo celular (`attach_only`), só
+  desconecta. **Fechar o app só desconecta**: ao abrir de novo, os chats com o tmux vivo voltam já conectados (não ficam
+  "em espera"), e o resto como antes. O botão de parar continua só na VPS.
+- Painel de sessões, aba local: "tmux abertos aqui" lista os do servidor `chube` que nenhum chat mostra (criados pelo
+  celular); clicar entra (`Chat::attach(None, …)`). "Abrir no terminal do Omarchy" entra no tmux.
+- Testado: unidade (63 + 1) e o script real num tmux isolado (`TMUX_TMPDIR` curto: o caminho do socket tem limite):
+  o `claude` é o próprio pid do painel, `~/.claude/sessions/<pid>.json` aparece (`idle`), título `✳`, variáveis passadas,
+  o tmux sobrevive ao SIGHUP. **Não testado** no app de verdade: abrir/fechar chats, reabrir o app com tmux vivo, lista
+  de tmux locais, clique.
 
 ## Terminal (VTE, `src/terminal.rs`)
 

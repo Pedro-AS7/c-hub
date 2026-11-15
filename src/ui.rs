@@ -155,7 +155,7 @@ impl Ui {
         let open_terminal = icon_button(ICON_TERMINAL, "Continuar no terminal do Omarchy (fecha o chat aqui)", &tx, || {
             Message::OpenInTerminal
         });
-        let kill_remote = icon_button(ICON_STOP, "Encerrar o agente na VPS (mata o tmux)", &tx, || Message::KillRemote);
+        let kill_remote = icon_button(ICON_STOP, "Encerrar o agente na VPS (mata o tmux; o × só desconecta)", &tx, || Message::KillRemote);
         let (mode, mode_items) = mode_selector(&tx);
         let close_panel = icon_button(ICON_CLOSE, "Voltar ao chat (Esc)", &tx, || Message::ClosePanel);
         let close_chat = gtk4::Button::with_label(ICON_CLOSE);
@@ -530,7 +530,8 @@ impl Ui {
                 self.fork.set_visible(true);
                 self.fork.set_sensitive(can_fork);
                 self.open_terminal.set_visible(true);
-                self.open_terminal.set_sensitive(can_fork || chat.host.is_some());
+                self.open_terminal.set_sensitive(can_fork || chat.tmux.is_some());
+                // Aqui o × já encerra; o botão de parar é para a VPS.
                 self.kill_remote.set_visible(chat.host.is_some() && !chat.attach_only);
                 // Também na VPS: o modo é lido no rodapé da TUI e trocado com Shift+Tab, pelo tmux.
                 self.mode.set_visible(chat.is_alive() && chat.agent == Agent::Claude && !chat.attach_only);
