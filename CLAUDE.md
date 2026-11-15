@@ -383,8 +383,9 @@ como veio. Vale só para os chats do Claude (os do Codex e as abas de terminal n
 - **Atalhos de pasta (2026-11-15)**: para quem não tem o `fshort`. No painel de nova sessão, "salvar atalho" (balão com o
   nome, sugerido pelo nome da pasta; avisa se o nome já existe ou se a pasta já tem atalho) grava o atalho para a pasta do
   campo; "atalhos" abre a lista: clicar põe o atalho no campo, editar (nome e pasta, `/…` ou `~/…`) e excluir (com
-  confirmação na própria linha). Ficam em `shortcuts` no `config.json`; os do `~/.shortcuts` aparecem embaixo, só leitura,
-  e um atalho do C-hub com o mesmo nome passa na frente. Esc num balão fecha só o balão.
+  confirmação na própria linha). Ficam em `shortcuts` no `config.json`; os do `~/.shortcuts` aparecem embaixo e, desde
+  2026-11-15, também têm editar e excluir: muda o `~/.shortcuts` no lugar (formato e regra de nome do `fshort`,
+  `^[A-Za-z0-9._-]+$`), então vale para o `go` do terminal. Um atalho do C-hub com o mesmo nome passa na frente. Esc num balão fecha só o balão.
 - **Cores** do tema atual do Omarchy (`~/.local/state/omarchy/current/theme/colors.toml`, `omarchy.rs`): fundo, texto,
   `muted` (apagado), acento, seleção e as ANSI (verde = "terminou", amarelo = aviso, vermelho = erro). No Starship do usuário o
   acento é `#7aa2f7` (overlay em `~/.config/omarchy/themes/starship/`) e o "verde" é laranja.

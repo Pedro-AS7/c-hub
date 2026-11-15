@@ -667,6 +667,25 @@ impl App {
                 self.shortcut_error = None;
                 self.shortcuts_version += 1;
             }
+            Message::UpdateShortcut(old, name, path) if self.is_fshort(&old) => {
+                // Um nome que já é atalho do C-hub ficaria escondido atrás dele.
+                let taken = name.trim() != old && self.dir_shortcuts.iter().any(|shortcut| shortcut.name == name.trim());
+                let result = if taken {
+                    Err(format!("Já existe um atalho \"{}\"", name.trim()))
+                } else {
+                    dir_shortcuts::expand(&path).and_then(|path| dir_shortcuts::update_fshort(&old, &name, &path))
+                };
+                match result {
+                    Ok(()) => {
+                        self.shortcut_editing = None;
+                        self.reload_shortcuts();
+                    }
+                    Err(error) => {
+                        self.shortcut_error = Some(error);
+                        self.shortcuts_version += 1;
+                    }
+                }
+            }
             Message::UpdateShortcut(old, name, path) => {
                 let result = dir_shortcuts::expand(&path).and_then(|path| {
                     let mut own = dir_shortcuts::own();
@@ -688,6 +707,11 @@ impl App {
                 self.shortcut_editing = None;
                 self.shortcut_error = None;
                 self.shortcuts_version += 1;
+            }
+            Message::DeleteShortcut(name) if self.is_fshort(&name) => {
+                self.shortcut_deleting = None;
+                self.shortcut_error = dir_shortcuts::delete_fshort(&name).err();
+                self.reload_shortcuts();
             }
             Message::DeleteShortcut(name) => {
                 let mut own = dir_shortcuts::own();
@@ -1388,6 +1412,16 @@ impl App {
         themes::set_custom(colors);
         themes::set_choice(palettes::CUSTOM);
         self.apply_theme();
+    }
+
+    /// O atalho `name` mostrado na lista é um do fshort (nenhum do C-hub com o mesmo nome).
+    fn is_fshort(&self, name: &str) -> bool {
+        self.dir_shortcuts.iter().any(|shortcut| shortcut.name == name && shortcut.fshort)
+    }
+
+    fn reload_shortcuts(&mut self) {
+        self.dir_shortcuts = dir_shortcuts::all();
+        self.shortcuts_version += 1;
     }
 
     /// Grava os atalhos do C-hub e relê a lista (com os do fshort).

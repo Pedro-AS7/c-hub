@@ -2,8 +2,9 @@
 //! no lugar do caminho (`proj` ou `proj/src`). Ficam em `config.json` (`shortcuts`, lista de
 //! `{name, path}`), para valer em qualquer máquina, com ou sem o `fshort`.
 //!
-//! Onde houver o `fshort` (`~/.shortcuts`, linhas `nome=/caminho`), os atalhos dele também valem,
-//! só para leitura; um atalho do C-hub com o mesmo nome tem prioridade.
+//! Onde houver o `fshort` (`~/.shortcuts`, linhas `nome=/caminho`), os atalhos dele também valem;
+//! um atalho do C-hub com o mesmo nome tem prioridade. Editar ou excluir um do fshort muda o
+//! `~/.shortcuts` (no formato e com a regra de nome do `fshort`): vale também para o `go` do terminal.
 
 use std::path::{Path, PathBuf};
 
@@ -30,10 +31,80 @@ pub fn save(list: &[(String, PathBuf)]) -> std::io::Result<()> {
     crate::config::set("shortcuts", to_json(list))
 }
 
+fn fshort_file() -> PathBuf {
+    std::env::var_os("SHORTCUTS_FILE").map_or_else(|| home_dir().join(".shortcuts"), PathBuf::from)
+}
+
 /// Os atalhos do `fshort`, na ordem do arquivo; vazio se ele não existe.
 pub fn fshort() -> Vec<(String, PathBuf)> {
-    let file = std::env::var_os("SHORTCUTS_FILE").map_or_else(|| home_dir().join(".shortcuts"), PathBuf::from);
-    std::fs::read_to_string(file).map(|text| parse_fshort(&text)).unwrap_or_default()
+    std::fs::read_to_string(fshort_file()).map(|text| parse_fshort(&text)).unwrap_or_default()
+}
+
+/// Edita o atalho `old` do fshort (nome e pasta), no mesmo lugar do arquivo.
+pub fn update_fshort(old: &str, name: &str, path: &Path) -> Result<(), String> {
+    let file = fshort_file();
+    let text = std::fs::read_to_string(&file).map_err(|error| format!("não consegui ler {}: {error}", file.display()))?;
+    write_fshort(&file, &edit_fshort(&text, old, name, path)?)
+}
+
+/// Exclui o atalho `name` do fshort.
+pub fn delete_fshort(name: &str) -> Result<(), String> {
+    let file = fshort_file();
+    let text = std::fs::read_to_string(&file).map_err(|error| format!("não consegui ler {}: {error}", file.display()))?;
+    write_fshort(&file, &remove_fshort(&text, name))
+}
+
+/// Grava como o `fshort` faz (`.tmp` + `mv`).
+fn write_fshort(file: &Path, text: &str) -> Result<(), String> {
+    let tmp = file.with_extension("tmp");
+    std::fs::write(&tmp, text)
+        .and_then(|()| std::fs::rename(&tmp, file))
+        .map_err(|error| format!("não consegui gravar {}: {error}", file.display()))
+}
+
+/// A regra de nome do `fshort` (`^[A-Za-z0-9._-]+$`), mais estrita que a do C-hub: o nome editado
+/// precisa continuar valendo no `go`.
+fn check_fshort_name(name: &str) -> Result<String, String> {
+    let name = check_name(name)?;
+    if name.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c)) {
+        Ok(name)
+    } else {
+        Err("No fshort o nome só pode ter letras, números, . _ -".into())
+    }
+}
+
+/// O `~/.shortcuts` com a linha de `old` trocada por `name=path`, no mesmo lugar. Erro se `name`
+/// já for de outro atalho do arquivo.
+fn edit_fshort(text: &str, old: &str, name: &str, path: &Path) -> Result<String, String> {
+    let name = check_fshort_name(name)?;
+    let key = |line: &str| line.split_once('=').map(|(key, _)| key.trim().to_owned());
+    if name != old && text.lines().any(|line| key(line).as_deref() == Some(name.as_str())) {
+        return Err(format!("Já existe um atalho \"{name}\""));
+    }
+    let mut found = false;
+    let mut out: Vec<String> = Vec::new();
+    for line in text.lines() {
+        if key(line).as_deref() == Some(old) {
+            // Repetido (o fshort não deixa, mas o arquivo é texto): só o primeiro fica.
+            if !found {
+                out.push(format!("{name}={}", path.display()));
+                found = true;
+            }
+        } else {
+            out.push(line.to_owned());
+        }
+    }
+    if !found {
+        return Err(format!("O atalho \"{old}\" não está mais no ~/.shortcuts"));
+    }
+    Ok(out.join("\n") + "\n")
+}
+
+/// O `~/.shortcuts` sem as linhas de `name` (como o `fshort -d`).
+fn remove_fshort(text: &str, name: &str) -> String {
+    let prefix = format!("{name}=");
+    let lines: Vec<&str> = text.lines().filter(|line| !line.starts_with(&prefix)).collect();
+    if lines.is_empty() { String::new() } else { lines.join("\n") + "\n" }
 }
 
 /// Todos os atalhos: os do C-hub e, depois, os do fshort que eles não substituem.
@@ -217,6 +288,21 @@ mod tests {
                 DirShortcut { name: "main".into(), path: "/home/u".into(), fshort: true },
             ]
         );
+    }
+
+    #[test]
+    fn editar_e_excluir_no_fshort() {
+        let text = "mvp=/home/u/dev\nmain=/home/u\nchb=/home/u/chube\n";
+        // Editar fica no mesmo lugar.
+        assert_eq!(edit_fshort(text, "main", "casa", Path::new("/home/u")).unwrap(), "mvp=/home/u/dev\ncasa=/home/u\nchb=/home/u/chube\n");
+        assert_eq!(edit_fshort(text, "mvp", "mvp", Path::new("/srv")).unwrap(), "mvp=/srv\nmain=/home/u\nchb=/home/u/chube\n");
+        assert!(edit_fshort(text, "main", "chb", Path::new("/x")).is_err(), "nome de outro atalho");
+        assert!(edit_fshort(text, "sumiu", "x", Path::new("/x")).is_err());
+        assert!(edit_fshort(text, "main", "ção", Path::new("/x")).is_err(), "regra do fshort");
+        assert_eq!(remove_fshort(text, "main"), "mvp=/home/u/dev\nchb=/home/u/chube\n");
+        // `main` não leva junto um `mainx`.
+        assert_eq!(remove_fshort("main=/a\nmainx=/b\n", "main"), "mainx=/b\n");
+        assert_eq!(remove_fshort("a=/a\n", "a"), "");
     }
 
     #[test]

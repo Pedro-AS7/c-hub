@@ -241,7 +241,7 @@ impl NewChatPanel {
         self.shortcuts.set_visible(!remote && !app.dir_shortcuts.is_empty());
     }
 
-    /// Refaz a lista do balão "atalhos": os do C-hub (usar, editar, excluir) e os do fshort (só usar).
+    /// Refaz a lista do balão "atalhos": os do C-hub e os do fshort, todos com usar, editar e excluir.
     fn rebuild_shortcuts(&self, app: &App) {
         while let Some(child) = self.shortcut_list.first_child() {
             self.shortcut_list.remove(&child);
@@ -251,7 +251,7 @@ impl NewChatPanel {
         let header = row!(
             &label(&format!("{ICON_BOOKMARK} "), &["accent"]),
             &label("atalhos", &["bold"]),
-            &label(&format!(" {}", own.len()), &["dim"])
+            &label(&format!(" {}", own.len() + fshort.len()), &["dim"])
         );
         self.shortcut_list.append(&header);
         if let Some(error) = &app.shortcut_error {
@@ -259,7 +259,7 @@ impl NewChatPanel {
             error.set_wrap(true);
             self.shortcut_list.append(&error);
         }
-        if own.is_empty() {
+        if own.is_empty() && fshort.is_empty() {
             let empty = label("Nenhum atalho ainda. Digite uma pasta no campo e clique em \"salvar atalho\".", &["dim"]);
             empty.set_wrap(true);
             self.shortcut_list.append(&empty);
@@ -278,11 +278,21 @@ impl NewChatPanel {
             self.shortcut_list.append(&item);
         }
         if !fshort.is_empty() {
-            let title = label("do fshort (~/.shortcuts, só leitura)", &["dim"]);
+            // Editar ou excluir estes muda o ~/.shortcuts: vale também para o `go` do terminal.
+            let title = label("do fshort (~/.shortcuts, também o go do terminal)", &["dim"]);
             title.set_margin_top(8);
             self.shortcut_list.append(&title);
             for shortcut in fshort {
-                self.shortcut_list.append(&self.shortcut_row(shortcut, false));
+                let item = if app.shortcut_editing.as_deref() == Some(shortcut.name.as_str()) {
+                    let (item, name) = self.editing_row(shortcut);
+                    focus = Some(name);
+                    item
+                } else if app.shortcut_deleting.as_deref() == Some(shortcut.name.as_str()) {
+                    self.deleting_row(shortcut)
+                } else {
+                    self.shortcut_row(shortcut, true)
+                };
+                self.shortcut_list.append(&item);
             }
         }
         // No ocioso: a linha em edição acabou de entrar no balão.
@@ -293,7 +303,7 @@ impl NewChatPanel {
         }
     }
 
-    /// Nome e pasta; clicar põe o atalho no campo. Os do C-hub têm editar e excluir.
+    /// Nome e pasta; clicar põe o atalho no campo. Com editar e excluir.
     fn shortcut_row(&self, shortcut: &DirShortcut, editable: bool) -> gtk4::Box {
         let name = label(&shortcut.name, &["accent"]);
         name.set_width_chars(10);
