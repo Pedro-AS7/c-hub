@@ -40,8 +40,6 @@ Merge da `gtk` na `omarchy` e instalado pelo `./install.sh` em 2026-11-14.
 teste: o teclado virtual só chega depois de um clique nela; o Ctrl direito no layout br (thinkpad) é `/`, use o esquerdo;
 o painel de nova sessão abre com Ctrl+Shift+N mesmo sem chat (estado vazio evita digitar num `claude` por engano).
 
-Rascunho da interface: `chub_racunho.png` (na raiz).
-
 Projeto em português (Brasil). Comentários e UI em PT-BR; identificadores de código em inglês.
 
 ## Versão Android: levar junto toda mudança aplicável (regra do dono, 2026-11-15)

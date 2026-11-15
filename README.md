@@ -6,8 +6,6 @@ desktop Linux, com um app Android para acompanhar e criar sessões pelo celular.
 Cada chat é o `claude` ou o `codex` interativo rodando num **tmux**, no seu PC ou num servidor (VPS) por SSH. Fechar o app só
 desconecta: o agente continua trabalhando, e dá para entrar na mesma sessão pelo desktop, pelo celular ou por um terminal.
 
-![Rascunho da interface](chub_racunho.png)
-
 > Projeto pessoal, sem ligação com a Anthropic ou a OpenAI. Interface e documentação em português do Brasil.
 
 ## O que tem
