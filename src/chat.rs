@@ -230,7 +230,7 @@ impl Chat {
         if self.host.is_some() { claude::home_dir() } else { self.cwd.clone() }
     }
 
-    /// Pasta para mostrar: `vps-r1:~/projeto` na VPS.
+    /// Pasta para mostrar: `minha-vps:~/projeto` na VPS.
     pub fn place_label(&self) -> String {
         match &self.host {
             Some(host) => format!("{host}:{}", self.cwd.display()),
@@ -457,14 +457,14 @@ mod tests {
 
     #[test]
     fn omarchy_mode_never_runs_on_the_vps() {
-        let new = Chat::new(1, Agent::Claude, "/tmp".into(), None, None).with_place(true, Some("vps-r1".into()));
+        let new = Chat::new(1, Agent::Claude, "/tmp".into(), None, None).with_place(true, Some("minha-vps".into()));
         assert!(!new.auto);
         let local = Chat::new(2, Agent::Claude, "/tmp".into(), None, None).with_place(true, None);
         assert!(local.auto);
         let open = OpenChat {
             agent: Agent::Claude, session_id: "sessao".into(), cwd: "/tmp".into(),
             title: "Teste".into(), model: None, parent: None,
-            auto: true, host: Some("vps-r1".into()), tmux: Some("chube-1".into()),
+            auto: true, host: Some("minha-vps".into()), tmux: Some("chube-1".into()),
         };
         assert!(!Chat::restore(3, &open, true).auto);
     }
@@ -489,7 +489,7 @@ mod tests {
     #[test]
     fn chat_da_vps_roda_no_tmux_e_volta_ao_mesmo() {
         let mut chat = Chat::new(1, Agent::Claude, "~/projeto".into(), None, Some("oi".into()))
-            .with_place(false, Some("vps-r1".into()));
+            .with_place(false, Some("minha-vps".into()));
         let (program, args) = chat.command();
         assert_eq!(program, "ssh");
         let tmux = chat.tmux.clone().unwrap();
@@ -498,7 +498,7 @@ mod tests {
         assert!(!script.contains("--permission-mode auto"));
         assert!(script.contains(" -- oi"));
         assert_eq!(chat.local_dir(), claude::home_dir());
-        assert_eq!(chat.place_label(), "vps-r1:~/projeto");
+        assert_eq!(chat.place_label(), "minha-vps:~/projeto");
         // Reabrir: mesmo tmux, retomando a sessão (ou começando de novo com o mesmo id).
         let mut reopened = chat.reopen(2).unwrap();
         assert_eq!(reopened.tmux.as_deref(), Some(tmux.as_str()));
@@ -509,7 +509,7 @@ mod tests {
         let mut fork = chat.fork(3).unwrap();
         fork.command();
         assert_ne!(fork.tmux, chat.tmux);
-        assert_eq!(fork.host.as_deref(), Some("vps-r1"));
+        assert_eq!(fork.host.as_deref(), Some("minha-vps"));
     }
 
     #[test]
@@ -540,7 +540,7 @@ mod tests {
         let open = OpenChat {
             agent: Agent::Claude, session_id: format!("{TMUX_ID_PREFIX}celular"), cwd: "~".into(),
             title: "celular".into(), model: None, parent: None,
-            auto: false, host: Some("vps-r1".into()), tmux: Some("celular".into()),
+            auto: false, host: Some("minha-vps".into()), tmux: Some("celular".into()),
         };
         let mut chat = Chat::restore(1, &open, true);
         assert!(chat.attach_only);

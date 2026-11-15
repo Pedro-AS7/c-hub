@@ -44,16 +44,23 @@ Rascunho da interface: `chub_racunho.png` (na raiz).
 
 Projeto em português (Brasil). Comentários e UI em PT-BR; identificadores de código em inglês.
 
-## Versão Android: levar junto toda mudança aplicável (regra do usuário, 2026-11-15)
+## Versão Android: levar junto toda mudança aplicável (regra do dono, 2026-11-15)
 
-Existe o **C-hub Android** em `~/projects/chub-android` (Kotlin + Compose; sem sessão local, entra por SSH nos tmux do
-notebook e da VPS). **Toda mudança feita aqui que fizer sentido no celular deve ser feita lá também, na mesma tarefa, sem
-o usuário pedir**: interface e comportamento da lista e dos chats, status, scripts e opções do tmux (os nomes, as opções e
-os scripts do `src/remote.rs` são os mesmos de `app/src/main/java/com/pedro/chub/ssh/Scripts.kt`), temas, atalhos de pasta,
-formato do `config.json`, nova sessão, sessões salvas. Não se aplica o que é só do desktop (VTE, filtro de cores, GTK,
-atalhos de teclado, integração com o Hyprland/Omarchy local). Na dúvida, aplique e diga o que ficou de fora e por quê.
-Depois: `./gradlew :app:testDebugUnitTest :app:assembleDebug` e `adb install -r app/build/outputs/apk/debug/app-debug.apk`
-se o celular estiver no adb (veja o `CLAUDE.md` de lá), e commit nos dois repositórios.
+O **C-hub Android** fica em `android/` (Kotlin + Compose; sem sessão local, entra por SSH nos tmux do PC e dos
+servidores; detalhes no `android/CLAUDE.md`). Até 2026-11-15 era um repositório à parte (`chub-android`), trazido para cá
+sem o histórico, que tinha dados pessoais. **Toda mudança feita no desktop que fizer sentido no celular deve ser feita lá
+também, na mesma tarefa, sem precisar pedir**: interface e comportamento da lista e dos chats, status, scripts e opções do
+tmux (os nomes, as opções e os scripts do `src/remote.rs` são os mesmos de
+`android/app/src/main/java/com/pedro/chub/ssh/Scripts.kt`), temas, atalhos de pasta, formato do `config.json`, nova
+sessão, sessões salvas. Não se aplica o que é só do desktop (VTE, filtro de cores, GTK, atalhos de teclado, integração com
+o Hyprland/Omarchy local). Na dúvida, aplique e diga o que ficou de fora e por quê. Depois, em `android/`:
+`./gradlew :app:testDebugUnitTest :app:assembleDebug` e `adb install -r app/build/outputs/apk/debug/app-debug.apk` se o
+celular estiver no adb. Um commit só para as duas partes.
+
+**Repositório público** (github.com/Pedro-AS7/c-hub): nada de IPs, hosts, usuários ou chaves reais no código, nos testes ou
+nos documentos (use `minha-vps`, `100.64.0.1`, `user`). Guia de instalação em `docs/configuracao.md` (manter em dia quando
+mudar requisito, script de `scripts/` ou passo de configuração); regras para quem contribui no `CONTRIBUTING.md`; CI em
+`.github/workflows/ci.yml` (`cargo test` num contêiner do Arch e os testes + APK do Android).
 
 ## Stack
 
@@ -253,7 +260,7 @@ env -u ANTHROPIC_API_KEY claude (--session-id <uuid> | --resume <id> | --resume 
 
 ## Chats locais no tmux (2026-11-14, branch `tmux-local`)
 
-**Por quê:** o C-hub Android (`~/projects/chub-android`) entra por SSH nas sessões do notebook; um PTY dentro do app não
+**Por quê:** o C-hub Android (`android/`) entra por SSH nas sessões do notebook; um PTY dentro do app não
 deixa ninguém de fora entrar. Agora cada chat local roda num tmux daqui, como os da VPS.
 
 - Servidor próprio: `tmux -L chube -f /dev/null` (`remote::LOCAL_TMUX`), separado do tmux do usuário e sem a configuração
@@ -345,7 +352,7 @@ como veio. Vale só para os chats do Claude (os do Codex e as abas de terminal n
 - O seletor de modo vale também na VPS: lê o rodapé da TUI na tela e manda Shift+Tab, que passam pelo tmux (menos nos
   chats que só entram num tmux de fora, que podem estar num shell).
 - SSH: cada conexão autentica de novo (`ControlMaster=no`, `ControlPath=none`, mesmo que o `~/.ssh/config` tenha um mestre).
-  Desde 2026-11-13 a chave do `vps-r1` entra no `ssh-agent` com confirmação (`AddKeysToAgent confirm`; askpass
+  Desde 2026-11-13 a chave do `minha-vps` entra no `ssh-agent` com confirmação (`AddKeysToAgent confirm`; askpass
   `~/.local/bin/ssh-confirmar` com o `hyprland-dialog`, veja o `~/.claude/sistema.md`): **cada conexão abre a janela
   "Permitir o uso da chave SSH?"**, e um processo qualquer não pega carona numa conexão do Chube. A senha da chave é digitada
   no terminal do primeiro chat da sessão; sem a chave no agente, as conexões sem terminal (`BatchMode=yes`) falham com

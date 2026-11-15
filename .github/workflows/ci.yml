@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  desktop:
+    name: Desktop (cargo test)
+    runs-on: ubuntu-latest
+    # GTK 4.18 e VTE 0.78 ainda não estão no Ubuntu do GitHub: compila no Arch, a plataforma de referência.
+    container: archlinux:latest
+    steps:
+      - name: Dependências
+        run: pacman -Syu --noconfirm --needed base-devel rust gtk4 vte4 tmux git
+      - uses: actions/checkout@v5
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ hashFiles('Cargo.lock') }}
+      - name: Testes
+        run: cargo test --locked
+
+  android:
+    name: Android (testes e APK)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: android
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+      - name: SDK (plataforma 37)
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-37.0" "build-tools;37.0.0" > /dev/null
+      - uses: gradle/actions/setup-gradle@v5
+      - name: Testes e APK de depuração
+        run: ./gradlew :app:testDebugUnitTest :app:assembleDebug
+      - uses: actions/upload-artifact@v5
+        with:
+          name: c-hub-android-debug
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 30

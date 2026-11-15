@@ -535,8 +535,8 @@ mod tests {
 
     #[test]
     fn hosts_do_ssh_config() {
-        let config = "Host vps-r1\n    HostName 1.2.3.4\nHost *\n  User x\nhost outro \"terceiro\" vps-r1\n";
-        assert_eq!(parse_hosts(config), ["vps-r1", "outro", "terceiro"]);
+        let config = "Host minha-vps\n    HostName 1.2.3.4\nHost *\n  User x\nhost outro \"terceiro\" minha-vps\n";
+        assert_eq!(parse_hosts(config), ["minha-vps", "outro", "terceiro"]);
     }
 
     #[test]
@@ -558,15 +558,15 @@ mod tests {
             agent,
             "export PATH=\"$HOME/.local/bin:$PATH\"; env -u ANTHROPIC_API_KEY claude --session-id abc -- 'oi; rm -rf /'"
         );
-        let (program, args) = command("vps-r1", "~/x", "chube-1234", Some(&agent));
+        let (program, args) = command("minha-vps", "~/x", "chube-1234", Some(&agent));
         assert_eq!(program, "ssh");
         assert_eq!(args[0], "-t");
         let script = args.last().unwrap();
-        assert_eq!(args[args.len() - 2], "vps-r1");
+        assert_eq!(args[args.len() - 2], "minha-vps");
         assert!(script.starts_with("cd \"$HOME\"/x 2>/dev/null || cd; exec tmux new-session -A -s chube-1234 "));
         assert!(script.contains("bash -lc 'export PATH="));
         assert!(script.contains("set-option -t chube-1234 status off"));
-        let (_, attach) = command("vps-r1", "~", "do celular", None);
+        let (_, attach) = command("minha-vps", "~", "do celular", None);
         assert!(attach.last().unwrap().starts_with("exec tmux attach-session -t 'do celular' \\; "));
     }
 
@@ -580,16 +580,16 @@ mod tests {
 
     #[test]
     fn lista_da_vps() {
-        let text = "H\t/home/pedro\n\
-T\tchube-1234\t0\t/home/pedro/projects/x\t✳ Corrigir testes\n\
+        let text = "H\t/home/user\n\
+T\tchube-1234\t0\t/home/user/projects/x\t✳ Corrigir testes\n\
 T\tcelular\t1\t/srv\tbash\n\
 F\t1794617482\tprojeto/abc.jsonl\n\
-\"cwd\":\"/home/pedro/projects/x\"\n\
+\"cwd\":\"/home/user/projects/x\"\n\
 \"aiTitle\":\"Título da IA\n\
 \"customTitle\":\"Meu t\\u00edtulo\n\
 F\t1794617000\toutro/sem-titulo.jsonl\n\
 \"cwd\":\"/tmp\"\n";
-        let listing = parse_listing("vps-r1", text);
+        let listing = parse_listing("minha-vps", text);
         assert_eq!(listing.tmux.len(), 2);
         assert_eq!(listing.tmux[0].path, "~/projects/x");
         assert!(!listing.tmux[0].attached && listing.tmux[1].attached);
@@ -598,7 +598,7 @@ F\t1794617000\toutro/sem-titulo.jsonl\n\
         assert_eq!(saved.id, "abc");
         assert_eq!(saved.cwd, PathBuf::from("~/projects/x"));
         assert_eq!(saved.title, "Meu título");
-        assert_eq!(saved.host.as_deref(), Some("vps-r1"));
+        assert_eq!(saved.host.as_deref(), Some("minha-vps"));
     }
 
     #[test]

@@ -158,7 +158,7 @@ mod tests {
         let mut codex = chat("b", None);
         codex.agent = crate::agent::Agent::Codex;
         codex.auto = true;
-        codex.host = Some("vps-r1".into());
+        codex.host = Some("minha-vps".into());
         codex.tmux = Some("chube-1".into());
         let mixed = OpenChats { chats: vec![old.chats[0].clone(), codex], focused: 1 };
         assert_eq!(parse(&to_json(&mixed)), Some(mixed));

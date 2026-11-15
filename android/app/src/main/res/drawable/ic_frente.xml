@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- "> _" de terminal, no acento do Tokyo Night, dentro da zona segura do ícone adaptativo. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
+    <path android:strokeColor="#7aa2f7" android:strokeWidth="6" android:strokeLineCap="square"
+        android:strokeLineJoin="miter" android:fillColor="#00000000"
+        android:pathData="M36,40 L50,54 L36,68" />
+    <path android:fillColor="#c0caf5" android:pathData="M54,64 L74,64 L74,70 L54,70 Z" />
+</vector>
