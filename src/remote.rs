@@ -179,6 +179,9 @@ fn tmux_script(binary: &str, dir: &str, tmux: &str, agent: Option<&str>, env: &[
         format!("set-option -t {name} mouse on"),
         format!("set-option -t {name} set-titles on"),
         format!("set-option -t {name} set-titles-string '#{{pane_title}}'"),
+        // Com o celular e o desktop na mesma sessão, a janela tem o tamanho de quem mexeu por
+        // último; o que sobra no maior fica em branco, não pontilhado. (`-q`: tmux antigo ignora.)
+        format!("set-option -wq -t {name} fill-character ' '"),
         "set-option -as terminal-features ',xterm-256color:RGB'".to_owned(),
     ]
     .join(" \\; ");
