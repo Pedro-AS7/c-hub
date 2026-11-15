@@ -1,81 +1,87 @@
 # C-hub
 
-Gerenciador de sessões do [Claude Code](https://claude.com/claude-code) e do [Codex](https://github.com/openai/codex) para o
-desktop Linux, com um app Android para acompanhar e criar sessões pelo celular.
+Session manager for [Claude Code](https://claude.com/claude-code) and [Codex](https://github.com/openai/codex) on the Linux
+desktop, with an Android app to follow and start sessions from your phone.
 
-Cada chat é o `claude` ou o `codex` interativo rodando num **tmux**, no seu PC ou num servidor (VPS) por SSH. Fechar o app só
-desconecta: o agente continua trabalhando, e dá para entrar na mesma sessão pelo desktop, pelo celular ou por um terminal.
+Each chat is an interactive `claude` or `codex` running inside **tmux**, either on your PC or on a server (VPS) over SSH.
+Closing the app only disconnects: the agent keeps working, and you can join the same session from the desktop, the phone or
+a terminal.
 
-> Projeto pessoal, sem ligação com a Anthropic ou a OpenAI. Interface e documentação em português do Brasil.
+> Personal project, not affiliated with Anthropic or OpenAI. The UI and the rest of the documentation are in Brazilian
+> Portuguese.
 
-## O que tem
+## Features
 
-**Desktop** (Rust + GTK4 + VTE; testado no [Omarchy](https://omarchy.org), Arch + Hyprland)
+**Desktop** (Rust + GTK4 + VTE; tested on [Omarchy](https://omarchy.org), Arch + Hyprland)
 
-- Lista de chats ativos agrupada por lugar e pasta, com o status de cada um: trabalhando, precisa de você, pronto, terminou
-- Chats locais num tmux próprio (`tmux -L chube`): sobrevivem ao fechamento do app, e o celular entra neles
-- **Sessões numa VPS** por SSH, cada uma num tmux de lá; o painel de sessões mostra os tmux abertos e as sessões salvas de lá
-- Sessões salvas para retomar e sub-chats (um chat novo com o contexto do chat em foco)
-- Seletor de modo de permissão do Claude, painel de consumo do plano e do contexto do chat
-- Terminal integrado com abas, ao lado do chat
-- Temas: segue o tema do Omarchy (cores, fonte, modo vidro) ou usa um dos próprios (Tokyo Night, Catppuccin, Gruvbox,
-  Nord…), com editor de cores
-- Atalhos de pasta no painel de nova sessão (também lê e edita o `~/.shortcuts` do `fshort`)
+- List of active chats grouped by location and folder, with each one's status: working, needs you, ready, finished
+- Local chats in a dedicated tmux server (`tmux -L chube`): they survive closing the app, and the phone can join them
+- **Sessions on a VPS** over SSH, each in its own tmux there; the sessions panel shows the open tmux sessions and the saved
+  sessions on that server
+- Saved sessions to resume, and sub-chats (a new chat carrying the context of the focused chat)
+- Claude permission mode selector, plan usage panel and chat context usage
+- Built-in terminal with tabs, next to the chat
+- Themes: follows the Omarchy theme (colors, font, glass mode) or uses one of its own (Tokyo Night, Catppuccin, Gruvbox,
+  Nord…), with a color editor
+- Folder shortcuts in the new session panel (it also reads and edits `fshort`'s `~/.shortcuts`)
 
-**Android** (Kotlin + Jetpack Compose, em [`android/`](android/))
+**Android** (Kotlin + Jetpack Compose, in [`android/`](android/))
 
-- Sem sessão local: entra por SSH nos tmux do PC e dos servidores, com o terminal do [Termux](https://github.com/termux/termux-app)
-- Lista com o status de cada chat; cria sessões novas, retoma sessões salvas, encerra
-- Chave SSH guardada no Keystore do Android, liberada pela biometria a cada conexão
-- Os mesmos temas e atalhos de pasta do desktop (lidos do PC)
+- No local sessions: connects over SSH to the tmux sessions on the PC and servers, using the
+  [Termux](https://github.com/termux/termux-app) terminal
+- List with each chat's status; start new sessions, resume saved ones, end them
+- SSH key stored in the Android Keystore, unlocked by biometrics on every connection
+- The same themes and folder shortcuts as the desktop (read from the PC)
 
-## Instalar
+## Installation
 
-O passo a passo completo, com o servidor e o celular, está em **[docs/configuracao.md](docs/configuracao.md)**.
+The complete step-by-step guide, including the server and the phone, is in **[docs/configuracao.md](docs/configuracao.md)**
+(in Portuguese).
 
-Resumo do desktop no Arch/Omarchy:
+Desktop quick start on Arch/Omarchy:
 
 ```sh
 sudo pacman -S --needed rust gtk4 vte4 tmux openssh
 git clone https://github.com/Pedro-AS7/c-hub.git && cd c-hub
-./install.sh             # compila em release e instala para o usuário (sem sudo)
-./install.sh --uninstall # remove
+./install.sh             # builds in release mode and installs for the current user (no sudo)
+./install.sh --uninstall # removes it
 ```
 
-Instala o binário em `~/.local/bin/chube`, o ícone e o atalho `.desktop` no launcher. Precisa do `claude` e/ou do `codex`
-instalados e logados. Outras distros e requisitos: [docs/configuracao.md](docs/configuracao.md#1-desktop).
+This installs the binary to `~/.local/bin/chube`, plus the icon and the `.desktop` launcher entry. It requires `claude`
+and/or `codex` to be installed and logged in. Other distros and requirements:
+[docs/configuracao.md](docs/configuracao.md#1-desktop).
 
-Opções: `chube [--agent omarchy|claude|codex] [--model <modelo>] [--open-directory <pasta>] [-- <pastas>…]`. `--agent`
-escolhe o agente das pastas abertas pela linha de comando ou pelo gerenciador de arquivos; `--model` define o modelo dos
-chats novos desse agente.
+Options: `chube [--agent omarchy|claude|codex] [--model <model>] [--open-directory <folder>] [-- <folders>…]`. `--agent`
+picks the agent for folders opened from the command line or the file manager; `--model` sets the model for that agent's
+new chats.
 
-## Como funciona
+## How it works
 
 ```
-  PC com o C-hub desktop                 VPS
+  PC running C-hub desktop               VPS
   tmux -L chube                          tmux
     chube-1a2b3c4d  (claude)               chube-9f8e7d6c  (claude)
     chube-5e6f7a8b  (codex)                chube-0a1b2c3d  (codex)
           ^                                      ^
-          |  ssh (sshd, só chave, pelo Tailscale) |  ssh
-          +------- celular (C-hub Android) -------+
+          |  ssh (sshd, key-only, via Tailscale)  |  ssh
+          +-------- phone (C-hub Android) --------+
 ```
 
-- O desktop abre os chats da VPS com `ssh -t <host>` e os locais direto no tmux daqui.
-- O nome da sessão (`chube-<8 hex>`), as opções do tmux e os scripts são os mesmos no desktop (`src/remote.rs`) e no
-  Android (`android/app/src/main/java/com/pedro/chub/ssh/Scripts.kt`): os dois veem e criam as mesmas sessões.
-- O status vem do próprio Claude Code (`~/.claude/sessions/<pid>.json`) e do título do terminal; o contexto e o modelo vêm
-  do histórico da sessão. Nada é gravado no servidor além do que o agente e o tmux já gravam.
-- Usa o login existente de cada CLI e tira `ANTHROPIC_API_KEY`/`OPENAI_API_KEY` do ambiente dos chats: o uso sai do
-  plano, não da API.
+- The desktop opens VPS chats with `ssh -t <host>` and local ones directly in the local tmux.
+- The session name (`chube-<8 hex>`), the tmux options and the scripts are the same on the desktop (`src/remote.rs`) and
+  on Android (`android/app/src/main/java/com/pedro/chub/ssh/Scripts.kt`): both see and create the same sessions.
+- Status comes from Claude Code itself (`~/.claude/sessions/<pid>.json`) and from the terminal title; context and model
+  come from the session history. Nothing is written on the server beyond what the agent and tmux already write.
+- It uses each CLI's existing login and strips `ANTHROPIC_API_KEY`/`OPENAI_API_KEY` from the chats' environment: usage
+  counts against your plan, not the API.
 
-## Contribuir
+## Contributing
 
-Issues e pull requests são bem-vindos. O **[CONTRIBUTING.md](CONTRIBUTING.md)** explica como montar o ambiente, rodar os
-testes e o que conferir antes do PR.
+Issues and pull requests are welcome. **[CONTRIBUTING.md](CONTRIBUTING.md)** explains how to set up the environment, run
+the tests and what to check before opening a PR.
 
-## Licença
+## License
 
-[GPL-3.0-only](LICENSE). O emulador e a view de terminal em `android/terminal/` vêm do
-[Termux](https://github.com/termux/termux-app) (Apache 2.0, veja `android/terminal/TERMUX-LICENSE.md`). A fonte
-JetBrains Mono Nerd Font do app Android é distribuída sob a SIL Open Font License (`android/licenses/`).
+[GPL-3.0-only](LICENSE). The terminal emulator and view in `android/terminal/` come from
+[Termux](https://github.com/termux/termux-app) (Apache 2.0, see `android/terminal/TERMUX-LICENSE.md`). The JetBrains Mono
+Nerd Font bundled with the Android app is distributed under the SIL Open Font License (`android/licenses/`).
